@@ -48,3 +48,7 @@ Vite + TypeScript + Canvas 2D. No game engine and no image files for sprites: al
 ## Credits
 
 Font: [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font) by TakWolf, under the SIL Open Font License 1.1 (`public/fonts/OFL.txt`).
+
+## License
+
+Code: [MIT](LICENSE). The font in `public/fonts/` keeps its own license (SIL OFL 1.1).
