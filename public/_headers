@@ -1,0 +1,13 @@
+# Hashed bundles never change: cache forever.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Fonts and card art keep fixed names: cache for a week.
+/fonts/*
+  Cache-Control: public, max-age=604800
+/cover.png
+  Cache-Control: public, max-age=604800
+
+# The game must load inside X's player-card iframe: allow any parent to frame it.
+/*
+  Content-Security-Policy: frame-ancestors *

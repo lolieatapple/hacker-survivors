@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hacker-survivors",
+  // Account comes from CLOUDFLARE_ACCOUNT_ID in .env (see .env.example).
+  "compatibility_date": "2026-11-02",
+  // Static-only site: Vite builds into dist/, Cloudflare serves it. No Worker script.
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page"
+  }
+}

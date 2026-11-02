@@ -1,0 +1,17 @@
+{
+  "name": "hacker-survivors",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host",
+    "deploy": "bun run build && wrangler deploy"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "wrangler": "4"
+  }
+}
