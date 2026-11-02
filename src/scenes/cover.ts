@@ -1,11 +1,12 @@
 // Title screen: an animated attract-mode scene.
 import { W, H, makeCanvas, bayer, hexToRgb, line, mulberry32 } from '../gfx';
 import { drawText, buildLogo, textWidth } from '../text';
-import { panel } from './ui';
+import { panel, Menu, type App, type MenuItem } from './ui';
 import { input } from '../input';
 import { sfx, playMusic, isMuted } from '../audio';
 import { tx, getLang, setLang } from '../i18n';
 import { save, persist } from '../save';
+import { usdShort, STAGES } from '../game/economy';
 import { HERO, ENEMIES, GEM, COLD_WALLET, buildBoss, buildMoon, buildCandles, buildSkyline, type EnemyDef } from '../sprites';
 
 const HORIZON = 98;
@@ -108,7 +109,8 @@ export class Cover {
   private nextGlitch = 2.5;
   private heroHurt = 0;
   private rnd = mulberry32(1337);
-  constructor(private onStart: () => void) {
+  private menu: Menu | null = null;
+  constructor(private app: App) {
     playMusic('title');
     const r = mulberry32(99);
     for (let i = 0; i < 70; i++) {
@@ -172,7 +174,8 @@ export class Cover {
       sfx('select');
     } else if (muteTap || input.pressed('KeyM')) {
       if (muteTap) window.dispatchEvent(new CustomEvent('toggle-mute'));
-    } else if (this.t > 0.3 && (input.anyKey() || input.taps.length)) { sfx('select'); this.onStart(); return; }
+    } else if (this.menu) this.menu.update();
+    else if (this.t > 0.3 && (input.anyKey() || input.taps.length)) { sfx('select'); this.openMenu(); }
     const r = this.rnd;
 
     for (const d of this.rain) {
@@ -434,7 +437,29 @@ export class Cover {
     drawText(ctx, isMuted() ? '♪ OFF' : '♪ ON', W - 63, 4, { size: 8, color: isMuted() ? '#5d6690' : '#39ff88', align: 'center' });
   }
 
+  private openMenu() {
+    const run = save.run;
+    let confirm = false; // a new run overwrites the saved one: ask twice
+    const items: MenuItem[] = [];
+    if (run) items.push({ label: () => tx(`继续 · 第 ${run.stage + 1} 关`, `Continue · Stage ${run.stage + 1}`), action: () => this.app.play() });
+    items.push({
+      label: () => (confirm ? tx('确定覆盖进度？', 'Overwrite run?') : tx('新游戏', 'New Run')),
+      action: () => { if (run && !confirm) { confirm = true; sfx('hurt'); return; } this.app.newRun(); },
+    });
+    items.push({ label: () => tx('排行榜', 'Leaderboard'), action: () => this.app.toLeaderboard() });
+    this.menu = new Menu(items, W / 2, 166 - items.length * 19, 160, 17, 2);
+  }
+
   private drawPrompt(ctx: CanvasRenderingContext2D) {
+    if (this.menu) {
+      const run = save.run, best = save.best;
+      const info = run ? tx(`进行中：第 ${run.stage + 1}/${STAGES} 关 · 资产 ${usdShort(run.assets)}`, `In progress: stage ${run.stage + 1}/${STAGES} · ${usdShort(run.assets)}`)
+        : best ? tx(`最佳：${usdShort(best.assets)} · ${best.won ? '全部通关' : `过了 ${best.cleared} 关`}`, `Best: ${usdShort(best.assets)} · ${best.won ? 'all cleared' : `${best.cleared} stages`}`)
+        : '';
+      if (info) drawText(ctx, info, W / 2, this.menu.y - 11, { size: 8, color: '#ffd23f', outline: '#0b0d17', align: 'center' });
+      this.menu.draw(ctx, this.t);
+      return;
+    }
     if (this.t % 1.1 >= 0.75) return;
     drawText(ctx, tx('▶ 点击 / 按任意键开始', '▶ TAP / PRESS ANY KEY'), W / 2, 148, { size: 12, color: '#ffd23f', outline: '#0b0d17', align: 'center' });
   }

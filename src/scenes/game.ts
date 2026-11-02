@@ -4,12 +4,14 @@ import { drawText, textWidth } from '../text';
 import { tx, T } from '../i18n';
 import { input } from '../input';
 import { sfx, playMusic, duckMusic, isMuted } from '../audio';
-import { markCleared } from '../save';
 import { HERO, AIRDROP, RUG, DRAINER, BUG } from '../sprites';
 import { NINJA, BOT, WHALE, GEMS, FAKE_GEM, USDT, BTC, CHEST, MINE, ICONS } from '../game/art';
 import { LEVELS, type LevelDef, type EnemyKind } from '../game/levels';
-import { WEAPONS, PASSIVES, MAX_LVL, rollChoices, orbitPositions, drawLightning, type OwnedWeapon, type PassiveId, type Choice, type WeaponId } from '../game/weapons';
+import { WEAPONS, PASSIVES, EVO_LVL, rollChoices, orbitPositions, drawLightning, weaponName, type OwnedWeapon, type PassiveId, type Choice, type WeaponId } from '../game/weapons';
 import { makeBrain, type Brain } from '../game/bosses';
+import { killUsd, recoveredUsd, recoveryRate, usdFull, usdShort, DEATH_FEE } from '../game/economy';
+import type { Build } from '../game/run';
+import { stepToward } from '../game/motion';
 import { panel, dim, wrap, Menu, type Scene, type App } from './ui';
 
 const params = new URLSearchParams(location.search);
@@ -27,7 +29,7 @@ export interface Enemy {
   ai?: (e: Enemy, g: Game, dt: number) => void;
   data: Record<string, number>;
 }
-interface Shot { x: number; y: number; vx: number; vy: number; dmg: number; pierce: number; life: number; hit: Set<Enemy>; bossOnly: boolean }
+interface Shot { x: number; y: number; vx: number; vy: number; dmg: number; pierce: number; life: number; hit: Set<Enemy>; bossOnly: boolean; evo: boolean }
 export interface EBullet { x: number; y: number; vx: number; vy: number; r: number; dmg: number; life: number; color: string; split?: number; pierceShield?: boolean }
 export interface Zone { x: number; y: number; r: number; warn: number; life: number; dmg: number; color: string; kind: 'hurt' | 'debt' | 'peg' | 'blast'; tick: number }
 type PickKind = 'gem' | 'heal' | 'chest' | 'btc' | 'fake';
@@ -66,7 +68,18 @@ function eliteImgs(d: EnemyDef): [HTMLCanvasElement, HTMLCanvasElement] {
 }
 
 const xpNeed = (l: number) => 3 + (l - 1) * 2 + Math.floor((l - 1) ** 1.3);
+
+// The build carries over, so each stage must hit harder than the last. Tuned with tools/sim.js.
+/** Enemy and boss HP multiplier for stage `idx` (0-based). */
+// Exponential base, plus a hump over stages ~9–19, where the build grows fastest and weapons evolve.
+export const stageHpMul = (idx: number) => 1.22 ** idx * (1 + 5 * Math.exp(-(((idx - 13) / 5) ** 2)));
+const stageDmgMul = (idx: number) => 1 + idx * 0.04;
+const stageXpMul = (idx: number) => 1 + idx * 0.06;
+
 type Overlay = null | 'intro' | 'levelup' | 'pause' | 'clear' | 'dead';
+
+/** What a cleared stage hands back to the run. */
+export interface StageResult { build: Build; earned: number; recovered: number; rate: number; kills: number; seconds: number }
 
 export class Game implements Scene {
   readonly level: LevelDef;
@@ -82,8 +95,12 @@ export class Game implements Scene {
   beams: Beam[] = [];
   bolts: { x: number; y: number; life: number; seed: number }[] = [];
   banners: Banner[] = [];
-  weapons: OwnedWeapon[] = [{ id: 'bolt', lvl: 1, cd: 0.3, locked: 0 }];
-  passives: Record<PassiveId, number> = { hp: 0, armor: 0, speed: 0, power: 0, haste: 0, magnet: 0, regen: 0 };
+  weapons: OwnedWeapon[];
+  passives: Record<PassiveId, number>;
+  /** USD earned in this stage so far (kills, then the boss recovery). */
+  earned = 0;
+  private recovered = 0;
+  private fee = 0; // death fee taken on REKT
   fx = { drain: 0, invert: 0, freeze: 0, gemsLocked: false, shieldOff: 0, fakeCards: false, enemyDmgMul: 1, enemySpdMul: 1, spawnMul: 1, pegZone: null as Zone | null };
   arena: { x: number; y: number; r: number } | null = null;
 
@@ -108,8 +125,13 @@ export class Game implements Scene {
   private realT = 0;
   private wonAt = 0;
 
-  constructor(private app: App, readonly idx: number) {
+  /** `banked`: run assets before this stage. */
+  constructor(private app: App, readonly idx: number, build: Build, readonly banked: number) {
     this.level = LEVELS[idx];
+    const p = this.player;
+    p.lvl = build.lvl; p.xp = build.xp; p.maxHp = build.maxHp; p.hp = build.maxHp; // every stage starts at full HP
+    this.weapons = build.weapons.map((w) => ({ id: w.id, lvl: w.lvl, cd: 0.3, locked: 0, ticks: 0 }));
+    this.passives = { ...build.passives };
     this.brain = makeBrain(this.level);
     this.brain.init?.(this);
     playMusic('waves');
@@ -123,6 +145,8 @@ export class Game implements Scene {
   sound(n: Parameters<typeof sfx>[0]) { sfx(n); }
   hasteMul() { return 1 + this.passives.haste * 0.08; }
   dmgMul() { return 1 + this.passives.power * 0.1; }
+  /** HP multiplier bosses apply to themselves and their props. */
+  get hpMul() { return stageHpMul(this.idx); }
   toScreen(x: number, y: number): [number, number] { return [Math.round(x - this.cam.x), Math.round(y - this.cam.y)]; }
   onScreen(x: number, y: number, m = 16) { const [sx, sy] = this.toScreen(x, y); return sx > -m && sy > -m && sx < W + m && sy < H + m; }
   angleTo(x: number, y: number) { return Math.atan2(this.player.y - 6 - y, this.player.x - x); }
@@ -156,8 +180,8 @@ export class Game implements Scene {
   }
   onScreenEnemies() { return this.enemies.filter((e) => !e.dead && !e.hidden && this.onScreen(e.x, e.y, -4)); }
 
-  addShot(x: number, y: number, vx: number, vy: number, dmg: number, pierce: number, bossOnly = false) {
-    this.shots.push({ x, y, vx, vy, dmg, pierce, life: 1.1, hit: new Set(), bossOnly });
+  addShot(x: number, y: number, vx: number, vy: number, dmg: number, pierce: number, bossOnly = false, evo = false) {
+    this.shots.push({ x, y, vx, vy, dmg, pierce, life: 1.1, hit: new Set(), bossOnly, evo });
   }
   shoot(x: number, y: number, a: number, speed: number, o: Partial<EBullet> = {}): EBullet {
     const b: EBullet = { x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, r: 2, dmg: 8, life: 5, color: '#ff4545', ...o };
@@ -195,12 +219,12 @@ export class Game implements Scene {
 
   spawnEnemy(kind: EnemyKind, x: number, y: number, elite = false): Enemy {
     const d = ENEMY_DEFS[kind];
-    const hpScale = (1 + this.idx * 0.01) * (1 + (Math.min(this.time, this.level.duration) / this.level.duration) * 0.7);
+    const hpScale = stageHpMul(this.idx) * (1 + (Math.min(this.time, this.level.duration) / this.level.duration) * 0.7);
     const [img, flashImg] = elite ? eliteImgs(d) : [d.img, d.flash];
     const hp = Math.round(d.hp * hpScale * (elite ? 10 : 1));
     const e: Enemy = {
       x, y, vx: 0, vy: 0, r: elite ? d.r * 2 : d.r, hp, maxHp: hp, speed: d.speed * (elite ? 0.8 : 1) * (0.9 + Math.random() * 0.2),
-      dmg: d.dmg * (elite ? 2 : 1), xp: d.xp * (elite ? 10 : 1), img, flashImg, colors: d.colors,
+      dmg: d.dmg * (elite ? 2 : 1), xp: Math.round(d.xp * (elite ? 10 : 1) * stageXpMul(this.idx)), img, flashImg, colors: d.colors,
       elite, boss: false, tag: kind, flash: 0, phase: Math.random() * 6.28, dead: false, orbCd: 0,
       invuln: false, hidden: false, alpha: 1, noContact: false, noKnock: elite, ghost: false, data: {},
     };
@@ -247,6 +271,7 @@ export class Game implements Scene {
     this.burst(e.x, e.y - e.r, e.colors, e.boss ? 24 : 8, e.boss ? 90 : 50);
     if (e.boss) { this.shake(0.25); this.sound('explode'); return; }
     this.kills++;
+    this.earned += killUsd(e.xp, this.idx);
     this.addPickup('gem', e.x, e.y - 3, e.xp);
     if (e.elite) this.addPickup('chest', e.x + 6, e.y - 3);
     else if (Math.random() < 0.012) this.addPickup('heal', e.x, e.y - 3);
@@ -255,7 +280,7 @@ export class Game implements Scene {
   hurtPlayer(raw: number) {
     const p = this.player;
     if (p.iframes > 0 || GOD || this.phase === 'won') return;
-    const dmg = Math.max(1, Math.round(raw * this.fx.enemyDmgMul) - this.passives.armor);
+    const dmg = Math.max(1, Math.round(raw * this.fx.enemyDmgMul * stageDmgMul(this.idx)) - this.passives.armor);
     p.hp -= dmg;
     p.iframes = 0.6;
     p.hurt = 0.2;
@@ -286,18 +311,25 @@ export class Game implements Scene {
     if (!open.length) return null;
     const w = open[Math.floor(Math.random() * open.length)];
     w.locked = seconds;
-    return T(WEAPONS[w.id].name);
+    return weaponName(w.id, w.lvl);
   }
   bossUnits() { return this.enemies.filter((e) => e.boss && !e.dead); }
 
   // ---------------- lifecycle ----------------
+  /** The build as it stands, for carrying into the next stage. Stage-only penalties are undone. */
+  private snapshot(): Build {
+    const p = this.player;
+    return { lvl: p.lvl, xp: p.xp, maxHp: p.maxHp + this.maxHpPenalty, weapons: this.weapons.map((w) => ({ id: w.id, lvl: w.lvl })), passives: { ...this.passives } };
+  }
   private die() {
     this.overlay = 'dead';
     playMusic(null);
     this.sound('dead');
+    this.fee = this.app.stageFailed();
     this.menu = new Menu([
-      { label: tx('重新挑战', 'Retry'), action: () => this.app.play(this.idx) },
-      { label: tx('关卡列表', 'Level Select'), action: () => this.app.toLevelSelect(this.idx) },
+      { label: tx('从本关重来', 'Retry Stage'), action: () => this.app.play() },
+      { label: tx('晒到 X', 'Post to X'), action: () => this.app.share('dead') },
+      { label: tx('返回封面', 'Title Screen'), action: () => this.app.toCover() },
     ], W / 2, 116);
   }
   private win() {
@@ -307,18 +339,26 @@ export class Game implements Scene {
     this.ebullets = [];
     this.zones = [];
     for (const e of this.enemies) if (!e.dead && !e.boss) this.killEnemy(e);
+    this.fx.gemsLocked = false; // the clear screen waits for every gem to be collected
     for (const p of this.pickups) p.magnet = true;
-    markCleared(this.idx, this.time, this.kills);
+    this.recovered = recoveredUsd(this.idx, this.bossTime);
     playMusic(null);
     this.sound('clear');
-    this.banner(tx('胜利！', 'VICTORY!'), '#39ff88', tx(`${T(this.level.boss)} 已被击败`, `${T(this.level.boss)} defeated`), 3);
+    this.banner(tx('胜利！', 'VICTORY!'), '#39ff88', tx(`追回被盗资产 ${usdFull(this.recovered)}`, `Recovered ${usdFull(this.recovered)} of stolen funds`), 3);
   }
   private openClear() {
     this.overlay = 'clear';
-    const items = [];
-    if (this.idx < LEVELS.length - 1) items.push({ label: tx('下一关', 'Next Level'), action: () => this.app.play(this.idx + 1) });
-    items.push({ label: tx('关卡列表', 'Level Select'), action: () => this.app.toLevelSelect(Math.min(LEVELS.length - 1, this.idx + 1)) });
-    this.menu = new Menu(items, W / 2, 118);
+    this.app.stageCleared({ build: this.snapshot(), earned: this.earned, recovered: this.recovered, rate: recoveryRate(this.bossTime), kills: this.kills, seconds: this.time });
+    const last = this.idx === LEVELS.length - 1;
+    this.menu = new Menu(last ? [
+      { label: tx('排行榜', 'Leaderboard'), action: () => this.app.toLeaderboard() },
+      { label: tx('晒到 X', 'Post to X'), action: () => this.app.share('won') },
+      { label: tx('返回封面', 'Title Screen'), action: () => this.app.toCover() },
+    ] : [
+      { label: tx('下一关', 'Next Stage'), action: () => this.app.play() },
+      { label: tx('晒到 X', 'Post to X'), action: () => this.app.share('progress') },
+      { label: tx('返回封面', 'Title Screen'), action: () => this.app.toCover() },
+    ], W / 2, 116);
   }
   private openPause() {
     this.overlay = 'pause';
@@ -326,41 +366,50 @@ export class Game implements Scene {
     this.menu = new Menu([
       { label: tx('继续', 'Resume'), action: () => this.resume() },
       { label: () => tx(`声音：${isMuted() ? '关' : '开'}`, `Sound: ${isMuted() ? 'OFF' : 'ON'}`), action: () => window.dispatchEvent(new CustomEvent('toggle-mute')) },
-      { label: tx('重新开始', 'Restart'), action: () => this.app.play(this.idx) },
-      { label: tx('关卡列表', 'Level Select'), action: () => this.app.toLevelSelect(this.idx) },
+      { label: tx('从本关重来', 'Restart Stage'), action: () => this.app.play() },
+      { label: tx('返回封面', 'Title Screen'), action: () => this.app.toCover() },
     ], W / 2, 64);
   }
   private resume() { this.overlay = null; this.menu = null; duckMusic(false); }
-  private openLevelup(chest: boolean) {
+  private openLevelup() {
     this.overlay = 'levelup';
-    this.choices = rollChoices(this, 3);
+    this.choices = rollChoices(this.weapons, this.passives, 3);
     if (this.fx.fakeCards && Math.random() < 0.85) {
       const i = Math.floor(Math.random() * 3);
       this.choices[i] = { ...this.choices[i], fake: true };
     }
     this.choiceSel = 0;
     this.sound('levelup');
-    void chest;
   }
+  private maxHpPenalty = 0; // Bybit fake cards: lasts for this stage only
   private applyChoice(c: Choice) {
     if (c.fake) {
       const lost = this.lockRandomWeapon(15);
-      this.player.maxHp = Math.max(40, this.player.maxHp - 15);
+      const cut = Math.min(15, this.player.maxHp - 40);
+      this.player.maxHp -= cut;
+      this.maxHpPenalty += cut;
       this.player.hp = Math.min(this.player.hp, this.player.maxHp);
-      this.banner(tx('盲签了伪造交易！', 'YOU BLIND-SIGNED A FAKE!'), '#ff4545', lost ? tx(`${lost} 被冻结 15 秒，最大生命 -15`, `${lost} frozen for 15s, max HP -15`) : tx('最大生命 -15', 'Max HP -15'), 2.5);
+      this.banner(tx('盲签了伪造交易！', 'YOU BLIND-SIGNED A FAKE!'), '#ff4545', lost ? tx(`${lost} 被冻结 15 秒，本关最大生命 -15`, `${lost} frozen for 15s, max HP -15 this stage`) : tx('本关最大生命 -15', 'Max HP -15 this stage'), 2.5);
       this.sound('hurt');
       return;
     }
     if (c.kind === 'weapon') {
       const id = c.id as WeaponId;
       const owned = this.weapons.find((w) => w.id === id);
-      if (owned) owned.lvl = Math.min(MAX_LVL, owned.lvl + 1);
-      else this.weapons.push({ id, lvl: 1, cd: 0, locked: 0 });
-    } else if (c.kind === 'passive') {
+      if (owned) {
+        owned.lvl++;
+        if (owned.lvl === EVO_LVL) {
+          this.banner(tx('武器进化！', 'WEAPON EVOLVED!'), '#ffd23f', weaponName(id, owned.lvl), 2.2);
+          this.burst(this.player.x, this.player.y - 8, ['#ffd23f', '#fff6c0', '#39ff88'], 30, 110);
+          this.sound('chest');
+          return;
+        }
+      } else this.weapons.push({ id, lvl: 1, cd: 0, locked: 0, ticks: 0 });
+    } else {
       const id = c.id as PassiveId;
       this.passives[id]++;
       if (id === 'hp') { this.player.maxHp += 20; this.player.hp += 20; }
-    } else this.heal(30);
+    }
     this.sound('select');
   }
 
@@ -378,15 +427,12 @@ export class Game implements Scene {
         return;
     }
     if (input.pressed('Escape', 'KeyP') || input.tapIn(W - 14, 5, 13, 13)) { this.openPause(); return; }
-    if (this.phase === 'won') {
-      this.world(dt);
-      if (this.realT - this.wonAt > 2.6) this.openClear();
-      return;
-    }
     this.world(dt);
     if (this.overlay) return;
-    if (this.chestPending > 0) { this.chestPending--; this.openLevelup(true); return; }
-    if (this.pendingLevelups > 0) { this.pendingLevelups--; this.openLevelup(false); }
+    // level-ups earned during the victory lap are still offered: the build carries on
+    if (this.chestPending > 0) { this.chestPending--; this.openLevelup(); return; }
+    if (this.pendingLevelups > 0) { this.pendingLevelups--; this.openLevelup(); return; }
+    if (this.phase === 'won' && this.realT - this.wonAt > 2.6 && !this.pickups.some((k) => k.kind === 'gem' || k.kind === 'chest')) this.openClear();
   }
 
   private updateLevelup() {
@@ -483,7 +529,7 @@ export class Game implements Scene {
       if (e.ai) e.ai(e, this, dt);
       else {
         const dx = p.x - e.x, dy = p.y - e.y, d = Math.hypot(dx, dy) || 1;
-        const s = e.speed * fx.enemySpdMul;
+        const s = e.speed * fx.enemySpdMul * ((e.data.slowUntil ?? 0) > this.time ? 0.5 : 1);
         e.x += (dx / d) * s * dt; e.y += (dy / d) * s * dt;
         if (d > 340 && !e.boss) { // recycle far stragglers around the player
           const a = Math.random() * 6.28;
@@ -568,11 +614,10 @@ export class Game implements Scene {
       k.age += dt;
       if (k.age < 0.35) { k.x += k.vx * dt; k.y += k.vy * dt; k.vy += 120 * dt; continue; }
       const locked = fx.gemsLocked && k.kind === 'gem';
-      const d = Math.hypot(p.x - k.x, p.y - 6 - k.y);
+      let d = Math.hypot(p.x - k.x, p.y - 6 - k.y);
       if (!locked && (k.magnet || d < magR || (k.kind === 'fake' && d < magR * 0.6))) {
         k.magnet = true;
-        const s = 90 + k.age * 30;
-        k.x += ((p.x - k.x) / d) * s * dt; k.y += ((p.y - 6 - k.y) / d) * s * dt;
+        d = stepToward(k, p.x, p.y - 6, 90 + k.age * 30, dt);
       }
       if (!locked && d < 7) {
         k.age = -1;
@@ -602,7 +647,7 @@ export class Game implements Scene {
 
   private spawnWaves(dt: number, mul: number) {
     const t = Math.min(this.time, this.level.duration);
-    const rate = (1.3 + t * 0.04 + this.idx * 0.03) * mul;
+    const rate = (1.3 + t * 0.04 + this.idx * 0.1) * mul; // later stages: denser hordes to mow down
     const cap = 240;
     this.spawnAcc += rate * dt;
     const pool = this.level.pool;
@@ -690,6 +735,13 @@ export class Game implements Scene {
 
     for (const s of this.shots) {
       const [sx, sy] = this.toScreen(s.x, s.y);
+      if (s.evo) { // ZK Barrage: fat golden bolts with a longer tail
+        ctx.fillStyle = '#9e6a00'; ctx.fillRect(Math.round(sx - s.vx * 0.018), Math.round(sy - s.vy * 0.018), 1, 1);
+        ctx.fillStyle = '#ff9f1c'; ctx.fillRect(Math.round(sx - s.vx * 0.012) - 1, Math.round(sy - s.vy * 0.012) - 1, 2, 2);
+        ctx.fillStyle = '#ffd23f'; ctx.fillRect(Math.round(sx - s.vx * 0.006) - 1, Math.round(sy - s.vy * 0.006) - 1, 2, 2);
+        ctx.fillStyle = '#fff6c0'; ctx.fillRect(sx - 1, sy - 1, 3, 3);
+        continue;
+      }
       ctx.fillStyle = '#1670a8'; ctx.fillRect(Math.round(sx - s.vx * 0.012), Math.round(sy - s.vy * 0.012), 1, 1);
       ctx.fillStyle = '#29d3ff'; ctx.fillRect(Math.round(sx - s.vx * 0.006), Math.round(sy - s.vy * 0.006), 1, 1);
       ctx.fillStyle = '#e6fbff'; ctx.fillRect(sx - 1, sy - 1, 2, 2);
@@ -850,6 +902,7 @@ export class Game implements Scene {
     drawText(ctx, `#${String(L.id).padStart(2, '0')} ${L.name}`, 3, 5, { size: 8, color: '#c8cde6', outline: '#0b0d17' });
     drawText(ctx, `LV ${p.lvl}`, 3, 14, { size: 8, color: '#29d3ff', outline: '#0b0d17' });
     drawText(ctx, `☠ ${this.kills}`, 34, 14, { size: 8, color: '#9aa3c7', outline: '#0b0d17' });
+    drawText(ctx, usdShort(this.banked + this.earned), 3, 23, { size: 8, color: '#ffd23f', outline: '#0b0d17' });
     // timer + objective
     const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
     if (this.phase === 'waves') {
@@ -871,14 +924,15 @@ export class Game implements Scene {
     ctx.fillStyle = '#c8cde6'; ctx.fillRect(W - 11, 9, 2, 5); ctx.fillRect(W - 7, 9, 2, 5);
     // weapon slots
     this.weapons.forEach((w, i) => {
-      const x = 3 + i * 12, y = H - 13;
-      ctx.fillStyle = '#05040b'; ctx.fillRect(x - 1, y - 1, 11, 11);
+      const x = 3 + i * 13, y = H - 20;
+      const evo = w.lvl >= EVO_LVL;
+      ctx.fillStyle = evo ? '#ffd23f' : '#05040b'; ctx.fillRect(x - 1, y - 1, 11, 11);
+      if (evo) { ctx.fillStyle = '#05040b'; ctx.fillRect(x, y, 9, 9); }
       ctx.globalAlpha = w.locked > 0 ? 0.3 : 1;
       ctx.drawImage(WEAPONS[w.id].icon, x, y);
       ctx.globalAlpha = 1;
       if (w.locked > 0) { ctx.fillStyle = '#ff4545'; ctx.fillRect(x + 1, y + 4, 7, 1); ctx.fillRect(x + 4, y + 1, 1, 7); }
-      ctx.fillStyle = '#ffd23f';
-      for (let l = 0; l < w.lvl; l++) ctx.fillRect(x + l * 2, y + 10, 1, 1);
+      drawText(ctx, String(w.lvl), x + 4, y + 10, { size: 8, color: evo ? '#ffd23f' : '#c8cde6', outline: '#0b0d17', align: 'center' });
     });
     // status effects
     const fx = this.fx;
@@ -894,7 +948,7 @@ export class Game implements Scene {
     if (this.phase === 'boss') {
       const bosses = this.bossUnits().filter((e) => e.tag === 'boss');
       const hp = bosses.reduce((s, e) => s + Math.max(0, e.hp), 0), max = bosses.reduce((s, e) => s + e.maxHp, 0);
-      const bw = 180, bx = (W - bw) / 2, by = H - 9;
+      const bw = 150, bx = (W - bw) / 2, by = H - 9; // leaves room for 6 weapon slots on the left
       const immune = bosses.length > 0 && bosses.every((e) => e.invuln);
       drawText(ctx, T(L.boss) + (immune ? tx('  [无敌]', '  [IMMUNE]') : ''), W / 2, by - 10, { size: 8, color: immune ? '#29d3ff' : '#ff9f1c', outline: '#0b0d17', align: 'center' });
       ctx.fillStyle = '#0b0d17'; ctx.fillRect(bx - 1, by - 1, bw + 2, 6);
@@ -946,7 +1000,7 @@ export class Game implements Scene {
     if (this.overlay === 'intro') {
       dim(ctx, 0.8);
       panel(ctx, 16, 10, 288, 162, '#ff3d8b');
-      drawText(ctx, `LEVEL ${String(L.id).padStart(2, '0')} / ${LEVELS.length}  ·  ${L.date}`, W / 2, 14, { size: 8, color: '#9aa3c7', align: 'center' });
+      drawText(ctx, tx(`第 ${L.id} / ${LEVELS.length} 关  ·  ${L.date}  ·  资产 ${usdShort(this.banked)}`, `STAGE ${L.id} / ${LEVELS.length}  ·  ${L.date}  ·  ASSETS ${usdShort(this.banked)}`), W / 2, 14, { size: 8, color: '#9aa3c7', align: 'center' });
       drawText(ctx, L.name, W / 2, 24, { size: 12, color: '#39ff88', outline: '#0b0d17', align: 'center', scale: 2 });
       drawText(ctx, tx('被盗 ', 'STOLEN ') + T(L.loss), W / 2, 51, { size: 12, color: '#ff4545', align: 'center' });
       lines(T(L.flavor), 66, '#c8cde6', 268, 3);
@@ -973,8 +1027,13 @@ export class Game implements Scene {
         if (glitch) name = name.slice(0, -1) + '▒';
         const nameSize = textWidth(name, 12) <= 90 ? 12 : 8;
         drawText(ctx, name, x + 48, y + (nameSize === 12 ? 30 : 32), { size: nameSize, color: '#f4f4f8', align: 'center' });
-        const isNew = c.lvl === 1 && c.kind === 'weapon';
-        drawText(ctx, c.kind === 'heal' ? '' : isNew ? tx('新武器', 'NEW WEAPON') : `Lv ${c.lvl}`, x + 48, y + 44, { size: 8, color: isNew ? '#39ff88' : '#29d3ff', align: 'center' });
+        const isW = c.kind === 'weapon';
+        const [label, lc] = isW && c.lvl === 1 ? [tx('新武器', 'NEW WEAPON'), '#39ff88']
+          : isW && c.lvl === EVO_LVL ? [tx('★ 进化 ★', '★ EVOLVE ★'), '#ffd23f']
+          : isW && c.lvl > EVO_LVL ? [tx(`超频 Lv ${c.lvl}`, `OVERCLOCK Lv ${c.lvl}`), '#ff9f1c']
+          : [`Lv ${c.lvl}`, '#29d3ff'];
+        if (isW && c.lvl === EVO_LVL && !c.fake) { ctx.fillStyle = '#ffd23f'; ctx.globalAlpha = 0.12 + 0.08 * Math.sin(t * 6); ctx.fillRect(x + 1, y + 1, 94, 98); ctx.globalAlpha = 1; }
+        drawText(ctx, label, x + 48, y + 44, { size: 8, color: lc, align: 'center' });
         let ly = y + 57;
         for (const ln of wrap(c.desc, 8, 88).slice(0, 4)) { drawText(ctx, ln, x + 48, ly, { size: 8, color: '#c8cde6', align: 'center' }); ly += 10; }
         drawText(ctx, String(i + 1), x + 4, y + 2, { size: 8, color: '#5d6690' });
@@ -989,11 +1048,12 @@ export class Game implements Scene {
     } else if (this.overlay === 'clear') {
       dim(ctx, 0.85);
       drawText(ctx, tx('胜利！', 'VICTORY!'), W / 2, 20, { size: 12, color: '#39ff88', outline: '#0b0d17', align: 'center', scale: 3 });
-      drawText(ctx, tx(`${T(L.boss)} 已被击败`, `${T(L.boss)} defeated`), W / 2, 60, { size: 12, color: '#f4f4f8', align: 'center' });
-      const mm = Math.floor(this.time / 60), ss = String(Math.floor(this.time % 60)).padStart(2, '0');
-      drawText(ctx, tx(`用时 ${mm}:${ss}   击杀 ${this.kills}   等级 ${this.player.lvl}`, `Time ${mm}:${ss}   Kills ${this.kills}   Level ${this.player.lvl}`), W / 2, 76, { size: 8, color: '#ffd23f', align: 'center' });
+      const pct = Math.round(recoveryRate(this.bossTime) * 100);
+      drawText(ctx, tx(`${T(L.boss)} 已被击败`, `${T(L.boss)} defeated`), W / 2, 58, { size: 12, color: '#f4f4f8', align: 'center' });
+      drawText(ctx, tx(`追回 ${usdShort(this.recovered)}（${pct}%） · 拦截 ${usdShort(this.earned)}`, `Recovered ${usdShort(this.recovered)} (${pct}%) · Intercepted ${usdShort(this.earned)}`), W / 2, 74, { size: 8, color: '#c8cde6', align: 'center' });
+      drawText(ctx, tx('总资产 ', 'ASSETS ') + usdFull(this.banked + this.earned + this.recovered), W / 2, 86, { size: 12, color: '#ffd23f', outline: '#0b0d17', align: 'center' });
       const next = LEVELS[this.idx + 1];
-      drawText(ctx, next ? tx(`已解锁第 ${next.id} 关：${next.date} ${next.name}`, `Unlocked level ${next.id}: ${next.date} ${next.name}`) : tx('你在整部 Crypto 黑客史中幸存了下来！', 'You survived the entire history of crypto hacks!'), W / 2, 92, { size: 8, color: '#29d3ff', align: 'center' });
+      drawText(ctx, next ? tx(`下一关：第 ${next.id} 关 ${next.date} ${next.name}`, `Next: stage ${next.id}, ${next.date} ${next.name}`) : tx('你活过了整部 Crypto 黑客史！', 'You survived the entire history of crypto hacks!'), W / 2, 104, { size: 8, color: '#29d3ff', align: 'center' });
       this.menu?.draw(ctx, t);
     } else if (this.overlay === 'dead') {
       dim(ctx, 0.85);
@@ -1003,7 +1063,8 @@ export class Game implements Scene {
         : tx(`倒在黑客大军中，离 Boss 还差 ${Math.ceil(L.duration - this.time)} 秒`, `Swarmed ${Math.ceil(L.duration - this.time)}s before the boss`);
       drawText(ctx, killer, W / 2, 58, { size: 12, color: '#f4f4f8', align: 'center' });
       drawText(ctx, tx(`坚持 ${Math.floor(this.time)} 秒 · 击杀 ${this.kills} · 等级 ${this.player.lvl}`, `Survived ${Math.floor(this.time)}s · Kills ${this.kills} · Level ${this.player.lvl}`), W / 2, 74, { size: 8, color: '#9aa3c7', align: 'center' });
-      lines(tx('提示：', 'TIP: ') + T(L.hint), 88, '#29d3ff', 260, 2);
+      if (this.fee > 0) drawText(ctx, tx(`黑客卷走了你 ${Math.round(DEATH_FEE * 100)}% 的资产：-${usdFull(this.fee)}`, `Hackers took ${Math.round(DEATH_FEE * 100)}% of your assets: -${usdFull(this.fee)}`), W / 2, 85, { size: 8, color: '#ff4545', align: 'center' });
+      lines(tx('提示：', 'TIP: ') + T(L.hint), 97, '#29d3ff', 260, 2);
       this.menu?.draw(ctx, t);
     }
   }

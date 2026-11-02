@@ -11,5 +11,7 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Tests run under bun (bun test), which has its own types.
+  "exclude": ["src/**/*.test.ts"]
 }

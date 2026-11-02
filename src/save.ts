@@ -1,16 +1,23 @@
 // Progress persistence. Third-party iframes (e.g. an X player card) may block localStorage;
 // in that case progress lives in memory for the session and we warn once.
 import type { Lang } from './i18n';
-const KEY = 'hacker-survivors.save.v1';
+import { checkBuild, type Run } from './game/run';
+
+const KEY = 'hacker-survivors.save.v2';
+const OLD_KEY = 'hacker-survivors.save.v1'; // per-level unlocks; only its settings carry over
+
+export interface Best { assets: number; cleared: number; won: boolean; runId: string }
 
 export interface SaveData {
-  unlocked: number; // highest playable level index (0-based)
-  cleared: Record<number, { bestTime: number; kills: number }>;
+  playerId: string;    // anonymous id for the leaderboard
+  name?: string;       // leaderboard nickname, unset until the player picks one
   muted: boolean;
-  lang?: Lang; // unset until the player picks a language
+  lang?: Lang;         // unset until the player picks a language
+  run: Run | null;     // the run in progress
+  best: Best | null;   // best finished or abandoned run
 }
 
-function fresh(): SaveData { return { unlocked: 0, cleared: {}, muted: false }; }
+function fresh(): SaveData { return { playerId: crypto.randomUUID(), muted: false, run: null, best: null }; }
 
 function storage(): Storage | null {
   try {
@@ -28,27 +35,35 @@ const store = storage();
 function load(): SaveData {
   if (!store) return fresh();
   const raw = store.getItem(KEY);
-  if (raw === null) return fresh();
+  if (raw === null) {
+    const data = fresh();
+    const old = store.getItem(OLD_KEY);
+    if (old !== null) {
+      const o = JSON.parse(old) as { muted?: boolean; lang?: Lang };
+      if (typeof o.muted === 'boolean') data.muted = o.muted;
+      if (o.lang === 'zh' || o.lang === 'en') data.lang = o.lang;
+      store.removeItem(OLD_KEY);
+    }
+    return data;
+  }
   // A corrupt save is a real error: surface it instead of silently resetting progress.
   const parsed = JSON.parse(raw) as SaveData;
-  if (typeof parsed.unlocked !== 'number' || typeof parsed.cleared !== 'object') {
+  if (typeof parsed.playerId !== 'string' || typeof parsed.muted !== 'boolean' || !('run' in parsed) || !('best' in parsed)) {
     throw new Error(`[save] malformed save data: ${raw}`);
   }
+  if (parsed.run) checkBuild(parsed.run.build);
   return parsed;
 }
 
 export const save: SaveData = load();
 
-const params = new URLSearchParams(location.search);
-if (params.get('unlock') === 'all') save.unlocked = 27;
-
 export function persist() {
   if (store) store.setItem(KEY, JSON.stringify(save));
 }
 
-export function markCleared(idx: number, time: number, kills: number) {
-  const prev = save.cleared[idx];
-  if (!prev || time < prev.bestTime) save.cleared[idx] = { bestTime: time, kills };
-  save.unlocked = Math.max(save.unlocked, Math.min(27, idx + 1));
+/** Record a run's result if it beats the best so far. */
+export function recordBest(assets: number, cleared: number, won: boolean, runId: string) {
+  const b = save.best;
+  if (!b || assets > b.assets) save.best = { assets, cleared, won, runId };
   persist();
 }

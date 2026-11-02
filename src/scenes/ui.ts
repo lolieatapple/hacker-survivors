@@ -1,16 +1,28 @@
 // Scene contract and small UI widgets drawn in buffer space.
 import { drawText, textWidth, type FontSize } from '../text';
 import { input } from '../input';
+import type { StageResult } from './game';
 
 export interface Scene {
   update(dt: number): void;
   draw(ctx: CanvasRenderingContext2D): void;
 }
 
+export type ShareKind = 'progress' | 'dead' | 'won' | 'best';
+
+/** Scene switching plus the run in progress (one run = all 28 stages in a row). */
 export interface App {
   toCover(): void;
-  toLevelSelect(focus?: number): void;
-  play(levelIdx: number): void;
+  newRun(): void;
+  /** Play the run's current stage from its checkpoint. */
+  play(): void;
+  stageCleared(r: StageResult): void;
+  /** Applies the death fee to the run and returns the USD lost. */
+  stageFailed(): number;
+  toLeaderboard(): void;
+  share(kind: ShareKind): void;
+  /** Ask for a leaderboard nickname, then submit the best score under it. */
+  rename(): void;
 }
 
 export function panel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, border = '#ff3d8b', fill = '#0b0a18') {
@@ -56,7 +68,8 @@ export interface MenuItem { label: string | (() => string); action: () => void; 
 /** Vertical button list with keyboard + tap support. */
 export class Menu {
   sel = 0;
-  constructor(public items: MenuItem[], public x: number, public y: number, public w = 110, public h = 16, public gap = 4) {}
+  // h = 17: 12px glyphs need about 14px, plus the 1px border
+  constructor(public items: MenuItem[], public x: number, public y: number, public w = 110, public h = 17, public gap = 4) {}
 
   update() {
     if (input.pressed('ArrowUp', 'KeyW')) this.sel = (this.sel + this.items.length - 1) % this.items.length;

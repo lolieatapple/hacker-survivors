@@ -2,13 +2,18 @@ import { W, H, makeCanvas } from './gfx';
 import { loadFonts } from './text';
 import { input } from './input';
 import { unlockAudio, setMuted, isMuted, audioDebug } from './audio';
-import { setLang, type Lang } from './i18n';
-import { save, persist } from './save';
+import { setLang, tx, T, type Lang } from './i18n';
+import { save, persist, recordBest } from './save';
 import { Cover } from './scenes/cover';
-import { LevelSelect } from './scenes/levelSelect';
 import { LangSelect } from './scenes/langSelect';
+import { Leaderboard } from './scenes/leaderboard';
 import { Game } from './scenes/game';
 import type { App, Scene } from './scenes/ui';
+import { LEVELS } from './game/levels';
+import { newRun, cloneBuild, debugBuild, type Run } from './game/run';
+import { DEATH_FEE, usdFull, STAGES } from './game/economy';
+import { registerRun, submitScore, shareOnX } from './net';
+import { askName, nameInputOpen } from './nameInput';
 
 const view = document.getElementById('view') as HTMLCanvasElement | null;
 if (!view) throw new Error('#view canvas missing');
@@ -36,23 +41,131 @@ window.addEventListener('toggle-mute', () => {
 
 await loadFonts();
 
+const params = new URLSearchParams(location.search);
+// Debug runs (god mode, stage jumps, the sim) never touch the save or the leaderboard.
+const DEBUG = params.has('god') || params.has('level') || params.has('boss') || params.has('sim');
+
 let scene: Scene;
+let run: Run | null = save.run;
+/** Last result for the share text, kept after a finished run is cleared. */
+let lastResult = { assets: 0, cleared: 0, won: false };
+
+function persistRun() {
+  if (DEBUG) return;
+  save.run = run;
+  persist();
+}
+function needRun(): Run {
+  if (!run) throw new Error('[run] no run in progress');
+  return run;
+}
+function register(r: Run) {
+  if (DEBUG) return;
+  registerRun(r.id, save.playerId)
+    .then(() => { r.registered = true; persistRun(); })
+    .catch((e) => console.warn('[leaderboard] run not registered, this run will not be ranked:', e));
+}
+function submit(runId: string, assets: number, cleared: number, won: boolean) {
+  if (DEBUG || !save.name) return;
+  submitScore({ runId, playerId: save.playerId, name: save.name, assets, cleared, won })
+    .then((r) => console.info(`[leaderboard] submitted ${usdFull(assets)}, rank #${r.rank}`))
+    .catch((e) => console.warn('[leaderboard] submit failed:', e));
+}
+
 const app: App = {
-  toCover() { scene = new Cover(() => app.toLevelSelect()); },
-  toLevelSelect(focus?: number) { scene = new LevelSelect(app, focus); },
-  play(idx: number) { scene = new Game(app, idx); },
+  toCover() { scene = new Cover(app); },
+  newRun() {
+    const start = () => {
+      run = newRun();
+      persistRun();
+      app.play();
+    };
+    if (save.name || DEBUG) { start(); return; }
+    askName().then((name) => {
+      if (name) { save.name = name; persist(); }
+      start();
+    });
+  },
+  play() {
+    const r = needRun();
+    // The server times runs from registration, so only a run still on stage 1 may (re)try it.
+    if (!r.registered && r.stage === 0) register(r);
+    lastResult = { assets: r.assets, cleared: r.stage, won: false };
+    scene = new Game(app, r.stage, cloneBuild(r.build), r.assets);
+  },
+  stageCleared(res) {
+    const r = needRun();
+    r.build = res.build;
+    r.assets += res.earned + res.recovered;
+    r.kills += res.kills;
+    r.seconds += res.seconds;
+    const cleared = r.stage + 1, won = cleared === STAGES;
+    lastResult = { assets: r.assets, cleared, won };
+    if (!DEBUG) recordBest(r.assets, cleared, won, r.id);
+    if (r.registered) submit(r.id, r.assets, cleared, won);
+    if (won) run = null;
+    else r.stage = cleared;
+    persistRun();
+  },
+  stageFailed() {
+    const r = needRun();
+    const fee = Math.round(r.assets * DEATH_FEE);
+    r.assets -= fee;
+    r.deaths++;
+    lastResult = { assets: r.assets, cleared: r.stage, won: false };
+    persistRun();
+    return fee;
+  },
+  toLeaderboard() { scene = new Leaderboard(app); },
+  share(kind) {
+    const b = save.best;
+    if (kind === 'best' && !b) {
+      shareOnX(tx('《黑客幸存者》：像素风生存游戏，活过加密史上 28 场最狠的黑客攻击。', "Hacker Survivors: a pixel-art survivors game. Live through crypto's 28 worst hacks."));
+      return;
+    }
+    const { assets, cleared, won } = kind === 'best' && b ? b : lastResult;
+    const stage = LEVELS[Math.min(cleared, STAGES - 1)];
+    const text = kind === 'dead'
+      ? tx(`我在《黑客幸存者》第 ${cleared + 1} 关被「${T(stage.boss)}」掏空了，资产还剩 ${usdFull(assets)}。你能撑多久？`,
+        `Got drained by ${T(stage.boss)} on stage ${cleared + 1} of Hacker Survivors. ${usdFull(assets)} left. Can you last longer?`)
+      : won
+        ? tx(`我活过了加密史上全部 28 场黑客攻击，守住 ${usdFull(assets)} 资产！来《黑客幸存者》挑战我：`,
+          `I survived all 28 of crypto's worst hacks and kept ${usdFull(assets)} safe. Beat me in Hacker Survivors:`)
+        : tx(`我在《黑客幸存者》里扛过了 ${cleared} 场加密史上最狠的黑客攻击，守住 ${usdFull(assets)} 资产！你能活过几关？`,
+          `I survived ${cleared} of crypto's worst hacks in Hacker Survivors and kept ${usdFull(assets)} safe. How far can you get?`);
+    shareOnX(text);
+  },
+  rename() {
+    if (nameInputOpen()) return;
+    askName(save.name).then((name) => {
+      if (!name) return;
+      save.name = name;
+      persist();
+      const b = save.best;
+      if (b) submit(b.runId, b.assets, b.cleared, b.won); // the server keeps the best per player, under the new name
+      if (scene instanceof Leaderboard) setTimeout(() => (scene as Leaderboard).reload(), 600);
+    });
+  },
 };
 
 (window as unknown as { __app: App; __audio: typeof audioDebug }).__app = app; // debug hooks for automated playtests
 (window as unknown as { __audio: typeof audioDebug }).__audio = audioDebug;
+(window as unknown as { __run: () => Run | null; __debugRun: (stage: number) => void }).__run = () => run;
+(window as unknown as { __debugRun: (stage: number) => void }).__debugRun = (stage: number) => {
+  if (!DEBUG) throw new Error('__debugRun needs a debug URL flag (?god=1, ?level=N or ?sim=1)');
+  run = { ...newRun(), stage, build: stage ? debugBuild(stage) : newRun().build };
+};
 
-const params = new URLSearchParams(location.search);
 const forcedLang = params.get('lang');
 if (forcedLang === 'zh' || forcedLang === 'en') save.lang = forcedLang as Lang;
 const startLevel = params.get('level');
 if (save.lang) setLang(save.lang);
-if (startLevel !== null) app.play(Number(startLevel) - 1);
-else if (save.lang) app.toCover();
+if (startLevel !== null) {
+  const stage = Number(startLevel) - 1;
+  if (!(stage >= 0 && stage < STAGES)) throw new Error(`?level must be 1–${STAGES}, got ${startLevel}`);
+  run = { ...newRun(), stage, build: debugBuild(stage) };
+  app.play();
+} else if (save.lang) app.toCover();
 else scene = new LangSelect(() => app.toCover());
 
 function present() {

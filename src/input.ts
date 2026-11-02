@@ -29,6 +29,7 @@ class Input {
 
   attach(el: HTMLElement) {
     window.addEventListener('keydown', (e) => {
+      if (e.target instanceof HTMLInputElement) return; // typing a nickname, not playing
       if (!this.keys.has(e.code)) this.edges.add(e.code);
       this.keys.add(e.code);
       if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();

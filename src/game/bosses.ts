@@ -35,7 +35,7 @@ class Timers {
 
 function spawnBoss(g: Game, L: LevelDef, hpBase: number, o: Partial<Enemy> = {}, color = L.color): Enemy {
   const spr = bossSprites(L.art === 'duo' ? 'duo' : L.art, color);
-  const hp = Math.round(hpBase * 0.65 * (1 + (L.id - 1) * 0.02));
+  const hp = Math.round(hpBase * 0.65 * g.hpMul);
   const a = -Math.PI / 2 + (Math.random() - 0.5) * 1.2;
   return g.spawnUnit({
     x: g.player.x + Math.cos(a) * 110, y: g.player.y + Math.sin(a) * 75,
@@ -228,7 +228,7 @@ const BRAINS: Record<number, Factory> = {
       const b = spawnBoss(g, L, 1300);
       b.invuln = true;
       for (let i = 0; i < 9; i++) {
-        g.spawnUnit({ x: b.x, y: b.y, img: KEY, hp: 70, maxHp: 70, tag: 'key', noContact: true, colors: ['#ffd23f', '#f4f4f8'], data: { i },
+        g.spawnUnit({ x: b.x, y: b.y, img: KEY, hp: Math.round(70 * g.hpMul), maxHp: Math.round(70 * g.hpMul), tag: 'key', noContact: true, colors: ['#ffd23f', '#f4f4f8'], data: { i },
           ai: (k, gg) => { const m = main(gg); if (!m) return; const a = gg.time * 0.8 + (k.data.i / 9) * 6.28; k.x = m.x + Math.cos(a) * 36; k.y = m.y - 10 + Math.sin(a) * 24; } });
       }
     },
@@ -303,7 +303,7 @@ const BRAINS: Record<number, Factory> = {
       g.fx.enemyDmgMul = price; g.fx.enemySpdMul = 0.8 + price * 0.2;
       if (!orb || orb.dead) T.every('orb', 8, dt, () => {
         const [x, y] = near(g, 80);
-        orb = g.spawnUnit({ x, y, img: ORACLE_ORB, hp: 160, maxHp: 160, tag: 'oracle', noContact: true, speed: 0, colors: ['#ffd23f', '#39ff88'], ai: () => {} });
+        orb = g.spawnUnit({ x, y, img: ORACLE_ORB, hp: Math.round(160 * g.hpMul), maxHp: Math.round(160 * g.hpMul), tag: 'oracle', noContact: true, speed: 0, colors: ['#ffd23f', '#39ff88'], ai: () => {} });
       }, 1);
       T.every('shot', 2, dt, () => aimed(g, b, Math.round(2 + price * 2), 0.15, 60 + price * 15, { color: '#ffb000' }));
     },
@@ -446,7 +446,9 @@ const BRAINS: Record<number, Factory> = {
 
   // 23 Balancer: rounding — every hit deals exactly 1
   23: (L) => { const T = new Timers(); return {
-    start(g) { spawnBoss(g, L, 260); },
+    // HP here counts hits, not damage, so cancel the stage HP scaling and grow it only
+    // with the extra hits per second a late-game build lands (more bolts, orbs, strikes).
+    start(g) { spawnBoss(g, L, (260 * 3) / g.hpMul); },
     update(g, dt) {
       const b = main(g); if (!b) return;
       T.every('ring', 1.6, dt, () => ring(g, b, 18, 40, g.time, { color: '#e0e0e0' }));
@@ -474,7 +476,7 @@ const BRAINS: Record<number, Factory> = {
       const img = shrink(gate.img);
       for (let i = 0; i < 3; i++) {
         const a = (i / 3) * 6.28;
-        g.spawnUnit({ x: g.player.x + Math.cos(a) * 95, y: g.player.y + Math.sin(a) * 65, img, flashImg: silhouette(img, '#fff'), hp: 260, maxHp: 260, tag: 'gate', speed: 0, noContact: true, ai: () => {} });
+        g.spawnUnit({ x: g.player.x + Math.cos(a) * 95, y: g.player.y + Math.sin(a) * 65, img, flashImg: silhouette(img, '#fff'), hp: Math.round(260 * g.hpMul), maxHp: Math.round(260 * g.hpMul), tag: 'gate', speed: 0, noContact: true, ai: () => {} });
       }
     },
     update(g, dt) {
@@ -528,7 +530,7 @@ const BRAINS: Record<number, Factory> = {
         CHAINS.forEach(([name, col], i) => {
           const img = chainNode(col);
           const a = (i / 10) * 6.28;
-          g.spawnUnit({ x: g.player.x + Math.cos(a) * 110, y: g.player.y + Math.sin(a) * 75, img, hp: 180, maxHp: 180, tag: 'node', speed: 0, noContact: true, colors: [col, '#f4f4f8'], data: { i }, ai: () => {} });
+          g.spawnUnit({ x: g.player.x + Math.cos(a) * 110, y: g.player.y + Math.sin(a) * 75, img, hp: Math.round(180 * g.hpMul), maxHp: Math.round(180 * g.hpMul), tag: 'node', speed: 0, noContact: true, colors: [col, '#f4f4f8'], data: { i }, ai: () => {} });
           void name;
         });
         g.banner(tx('10 条链同时告急', '10 CHAINS HIT'), '#f3ba2f', tx('先切断每条链上的攻击节点', 'Cut the attack node on every chain'), 2);
@@ -552,7 +554,7 @@ const BRAINS: Record<number, Factory> = {
           if (st === 'flash') { b.invuln = true; g.banner(tx('闪电贷', 'FLASH LOAN'), '#ffd23f', tx('Boss 无敌 3 秒', 'Immune for 3s'), 1); }
           if (st === 'invert') { g.fx.invert = 3.5; g.banner(tx('界面篡改', 'UI TAMPERED'), '#ff3d8b', tx('方向反转', 'Controls inverted'), 1); }
           if (st === 'phish') { for (let i = 0; i < 8; i++) { const [x, y] = near(g, 25 + Math.random() * 45); g.addPickup('fake', x, y); } g.banner(tx('钓鱼空投', 'PHISHING DROP'), '#ff4545', tx('别碰红色宝石', 'Avoid the red gems'), 1); }
-          if (st === 'reenter') { const img = shrink(b.img); for (let i = 0; i < 2; i++) { const [x, y] = near(g, 70); g.spawnUnit({ x, y, img, hp: 300, maxHp: 300, tag: 'clone', speed: 30, dmg: 10 }); } g.banner(tx('重入分身', 'CLONES'), '#ff3d8b', undefined, 1); }
+          if (st === 'reenter') { const img = shrink(b.img); for (let i = 0; i < 2; i++) { const [x, y] = near(g, 70); g.spawnUnit({ x, y, img, hp: Math.round(300 * g.hpMul), maxHp: Math.round(300 * g.hpMul), tag: 'clone', speed: 30, dmg: 10 }); } g.banner(tx('重入分身', 'CLONES'), '#ff3d8b', undefined, 1); }
           if (st === 'halt') { g.fx.freeze = 0.9; g.banner(tx('链停摆', 'CHAIN HALT'), '#29d3ff', undefined, 1); }
         }
         if (st === 'flash' && mt > 3) b.invuln = false;

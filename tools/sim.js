@@ -1,16 +1,23 @@
-// Dev-only balance harness. Not bundled. Open the game with ?god=1, then in devtools:
+// Dev-only balance harness. Not bundled. Open the game with ?sim=1 (add &god=1 for god mode),
+// then in devtools:
 //   const { sim } = await import('/tools/sim.js'); (await sim(0, 27)).join('\n')
+// Plays one continuous run like a player: the build carries over, and a death retries the
+// stage from its checkpoint (up to `retries` times) before giving up.
 // Autopilot: kites in a circle during waves; during the boss it orbits the current
 // target at ~70px (switching to keys/gates/nodes while the boss is immune) and walks
 // into peg zones. Upgrade cards are picked at random.
-export async function sim(from, to, { seconds = 600 } = {}) {
+export async function sim(from, to, { seconds = 600, retries = 2 } = {}) {
   const out = [];
-  for (let i = from; i <= to; i++) {
-    window.__app.play(i);
+  window.__debugRun(from);
+  let tries = 0;
+  for (let i = from; i <= to; ) {
+    const startRun = window.__run();
+    const startLvl = startRun.build.lvl;
+    window.__app.play();
     const g = window.__game;
     g.overlay = null;
     const dt = 1 / 20;
-    let steps = 0, err = null, bossStartLvl = null, maxEnemies = 0, ang = 0;
+    let steps = 0, err = null, bossStartLvl = null, maxEnemies = 0, ang = 0, wonT = null;
     try {
       while (steps < seconds / dt) {
         steps++;
@@ -53,12 +60,19 @@ export async function sim(from, to, { seconds = 600 } = {}) {
         if (g.overlay === 'levelup') { g.applyChoice(g.choices[Math.floor(Math.random() * g.choices.length)]); g.overlay = null; }
         if (g.overlay === 'clear' || g.overlay === 'dead') break;
         if (g.phase === 'boss' && bossStartLvl === null) bossStartLvl = p.lvl;
+        if (g.phase === 'won' && wonT === null) wonT = g.time;
         g.update(dt);
         maxEnemies = Math.max(maxEnemies, g.enemies.length);
         if (steps % 400 === 0) await new Promise((r) => setTimeout(r, 0));
       }
     } catch (e) { err = String((e && e.stack) || e).slice(0, 400); }
-    out.push(`L${i + 1} ${g.overlay || g.phase} t=${Math.round(g.time)} bossT=${Math.round(g.bossTime)} lvlAtBoss=${bossStartLvl} endLvl=${g.player.lvl} kills=${g.kills} maxE=${maxEnemies}${err ? ' ERR ' + err : ''}`);
+    const weapons = g.weapons.map((w) => w.id + w.lvl).join(',');
+    const run = window.__run();
+    const assets = run ? run.assets : g.banked + g.earned; // run is null after the final stage
+    out.push(`L${i + 1}${tries ? ' retry' + tries : ''} ${g.overlay || g.phase} t=${Math.round(g.time)} wonT=${wonT === null ? '-' : Math.round(wonT)} bossT=${Math.round(g.bossTime)} lvl=${startLvl}->${g.player.lvl} hp=${g.player.maxHp} kills=${g.kills} assets=$${(assets / 1e6).toFixed(0)}M [${weapons}] maxE=${maxEnemies}${err ? ' ERR ' + err : ''}`);
+    if (err) break;
+    if (g.overlay === 'clear') { i++; tries = 0; }
+    else if (++tries > retries) { out.push(`gave up at L${i + 1}`); break; }
   }
   return out;
 }

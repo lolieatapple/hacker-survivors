@@ -3,9 +3,22 @@
   "name": "hacker-survivors",
   // Account comes from CLOUDFLARE_ACCOUNT_ID in .env (see .env.example).
   "compatibility_date": "2026-11-02",
-  // Static-only site: Vite builds into dist/, Cloudflare serves it. No Worker script.
+  // Leaderboard API. Everything else is static files built by Vite into dist/.
+  "main": "worker/index.ts",
   "assets": {
     "directory": "./dist",
-    "not_found_handling": "404-page"
-  }
+    "binding": "ASSETS",
+    "not_found_handling": "404-page",
+    // Only these paths reach the Worker; all other requests are plain static files.
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hacker-survivors",
+      // An ID, not a credential: it is useless without access to the Cloudflare account.
+      "database_id": "29d44785-448b-4461-9d09-86164fccb523"
+    }
+  ],
+  "observability": { "enabled": true }
 }

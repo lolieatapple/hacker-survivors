@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host",
-    "build": "tsc --noEmit && vite build",
+    "test": "bun test",
+    "build": "tsc --noEmit && tsc --noEmit -p worker && vite build",
     "preview": "vite preview --host",
     "deploy": "bun run build && wrangler deploy"
   },
