@@ -12,6 +12,7 @@ import type { App, Scene } from './scenes/ui';
 import { LEVELS } from './game/levels';
 import { newRun, cloneBuild, debugBuild, type Run } from './game/run';
 import { DEATH_FEE, usdFull, STAGES } from './game/economy';
+import { assistMul } from './game/difficulty';
 import { registerRun, submitScore, shareOnX } from './net';
 import { askName, nameInputOpen } from './nameInput';
 
@@ -91,7 +92,7 @@ const app: App = {
     // The server times runs from registration, so only a run still on stage 1 may (re)try it.
     if (!r.registered && r.stage === 0) register(r);
     lastResult = { assets: r.assets, cleared: r.stage, won: false };
-    scene = new Game(app, r.stage, cloneBuild(r.build), r.assets);
+    scene = new Game(app, r.stage, cloneBuild(r.build), r.assets, assistMul(r.stageDeaths));
   },
   stageCleared(res) {
     const r = needRun();
@@ -103,6 +104,7 @@ const app: App = {
     lastResult = { assets: r.assets, cleared, won };
     if (!DEBUG) recordBest(r.assets, cleared, won, r.id);
     if (r.registered) submit(r.id, r.assets, cleared, won);
+    r.stageDeaths = 0;
     if (won) run = null;
     else r.stage = cleared;
     persistRun();
@@ -112,6 +114,7 @@ const app: App = {
     const fee = Math.round(r.assets * DEATH_FEE);
     r.assets -= fee;
     r.deaths++;
+    r.stageDeaths++;
     lastResult = { assets: r.assets, cleared: r.stage, won: false };
     persistRun();
     return fee;

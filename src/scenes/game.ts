@@ -5,13 +5,15 @@ import { tx, T } from '../i18n';
 import { input } from '../input';
 import { sfx, playMusic, duckMusic, isMuted } from '../audio';
 import { HERO, AIRDROP, RUG, DRAINER, BUG } from '../sprites';
-import { NINJA, BOT, WHALE, GEMS, FAKE_GEM, USDT, BTC, CHEST, MINE, ICONS } from '../game/art';
+import { NINJA, BOT, WHALE, PHISHER, MEV, LAZARUS, GEMS, FAKE_GEM, USDT, BTC, CHEST, MINE, ICONS } from '../game/art';
 import { LEVELS, type LevelDef, type EnemyKind } from '../game/levels';
 import { WEAPONS, PASSIVES, EVO_LVL, rollChoices, orbitPositions, drawLightning, weaponName, type OwnedWeapon, type PassiveId, type Choice, type WeaponId } from '../game/weapons';
 import { makeBrain, type Brain } from '../game/bosses';
 import { killUsd, recoveredUsd, recoveryRate, usdFull, usdShort, DEATH_FEE } from '../game/economy';
 import type { Build } from '../game/run';
-import { stepToward } from '../game/motion';
+import { stepToward, pickupPull } from '../game/motion';
+import { hpMul, bossHpMul, dmgMul, bossDmgMul, spdMul, xpMul, spawnRate, spawnCap, ringEvery, ringSize, eliteEvery, eliteCount, specials, specialChance, armorMul, phisherCap, bossSpawnCap } from '../game/difficulty';
+import { phisherAi, mevAi } from '../game/enemyAi';
 import { panel, dim, wrap, Menu, type Scene, type App } from './ui';
 
 const params = new URLSearchParams(location.search);
@@ -30,7 +32,7 @@ export interface Enemy {
   data: Record<string, number>;
 }
 interface Shot { x: number; y: number; vx: number; vy: number; dmg: number; pierce: number; life: number; hit: Set<Enemy>; bossOnly: boolean; evo: boolean }
-export interface EBullet { x: number; y: number; vx: number; vy: number; r: number; dmg: number; life: number; color: string; split?: number; pierceShield?: boolean }
+export interface EBullet { x: number; y: number; vx: number; vy: number; r: number; dmg: number; life: number; color: string; split?: number; pierceShield?: boolean; wave?: boolean }
 export interface Zone { x: number; y: number; r: number; warn: number; life: number; dmg: number; color: string; kind: 'hurt' | 'debt' | 'peg' | 'blast'; tick: number }
 type PickKind = 'gem' | 'heal' | 'chest' | 'btc' | 'fake';
 interface Pickup { x: number; y: number; kind: PickKind; value: number; vx: number; vy: number; magnet: boolean; age: number }
@@ -51,7 +53,11 @@ const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
   rug: def(RUG, 20, 19, 8, 2, ['#ff4545', '#ffd23f']),
   whale: def(WHALE, 60, 14, 12, 5, ['#627eea', '#3c4fa8']),
   ninja: def(NINJA, 14, 38, 7, 2, ['#1b2140', '#ff4545']),
+  phisher: def(PHISHER, 12, 30, 6, 2, ['#ff3d8b', '#f4f4f8']),
+  mev: def(MEV, 18, 30, 7, 2, ['#f7931a', '#39ff88']), // a dash is hard to dodge in a crowd: 9 made MEV bots a third of late wave damage
+  lazarus: def(LAZARUS, 45, 40, 10, 4, ['#2a2f45', '#ff4545']),
 };
+const AI: Partial<Record<EnemyKind, (e: Enemy, g: Game, dt: number) => void>> = { phisher: phisherAi, mev: mevAi };
 const ELITE_CACHE = new Map<HTMLCanvasElement, [HTMLCanvasElement, HTMLCanvasElement]>();
 function eliteImgs(d: EnemyDef): [HTMLCanvasElement, HTMLCanvasElement] {
   let hit = ELITE_CACHE.get(d.img);
@@ -69,12 +75,7 @@ function eliteImgs(d: EnemyDef): [HTMLCanvasElement, HTMLCanvasElement] {
 
 const xpNeed = (l: number) => 3 + (l - 1) * 2 + Math.floor((l - 1) ** 1.3);
 
-// The build carries over, so each stage must hit harder than the last. Tuned with tools/sim.js.
-/** Enemy and boss HP multiplier for stage `idx` (0-based). */
-// Exponential base, plus a hump over stages ~9–19, where the build grows fastest and weapons evolve.
-export const stageHpMul = (idx: number) => 1.22 ** idx * (1 + 5 * Math.exp(-(((idx - 13) / 5) ** 2)));
-const stageDmgMul = (idx: number) => 1 + idx * 0.04;
-const stageXpMul = (idx: number) => 1 + idx * 0.06;
+// Stage difficulty curves live in game/difficulty.ts.
 
 type Overlay = null | 'intro' | 'levelup' | 'pause' | 'clear' | 'dead';
 
@@ -126,8 +127,13 @@ export class Game implements Scene {
   private wonAt = 0;
 
   /** `banked`: run assets before this stage. */
-  constructor(private app: App, readonly idx: number, build: Build, readonly banked: number) {
+  /** `assist` (<= 1) scales enemy HP and damage: the comeback assist after deaths on this stage. */
+  constructor(private app: App, readonly idx: number, build: Build, readonly banked: number, readonly assist: number) {
     this.level = LEVELS[idx];
+    if (assist < 1) {
+      const pct = Math.round((1 - assist) * 100);
+      this.banner(tx('东山再起', 'COMEBACK'), '#39ff88', tx(`本关敌人血量和伤害 -${pct}%`, `Enemy HP and damage -${pct}% this stage`), 3.5);
+    }
     const p = this.player;
     p.lvl = build.lvl; p.xp = build.xp; p.maxHp = build.maxHp; p.hp = build.maxHp; // every stage starts at full HP
     this.weapons = build.weapons.map((w) => ({ id: w.id, lvl: w.lvl, cd: 0.3, locked: 0, ticks: 0 }));
@@ -146,7 +152,8 @@ export class Game implements Scene {
   hasteMul() { return 1 + this.passives.haste * 0.08; }
   dmgMul() { return 1 + this.passives.power * 0.1; }
   /** HP multiplier bosses apply to themselves and their props. */
-  get hpMul() { return stageHpMul(this.idx); }
+  /** Boss HP multiplier (bosses only; wave enemies use hpMul directly in spawnEnemy). */
+  get hpMul() { return bossHpMul(this.idx) * this.assist; }
   toScreen(x: number, y: number): [number, number] { return [Math.round(x - this.cam.x), Math.round(y - this.cam.y)]; }
   onScreen(x: number, y: number, m = 16) { const [sx, sy] = this.toScreen(x, y); return sx > -m && sy > -m && sx < W + m && sy < H + m; }
   angleTo(x: number, y: number) { return Math.atan2(this.player.y - 6 - y, this.player.x - x); }
@@ -219,14 +226,17 @@ export class Game implements Scene {
 
   spawnEnemy(kind: EnemyKind, x: number, y: number, elite = false): Enemy {
     const d = ENEMY_DEFS[kind];
-    const hpScale = stageHpMul(this.idx) * (1 + (Math.min(this.time, this.level.duration) / this.level.duration) * 0.7);
+    const hpScale = hpMul(this.idx) * this.assist * (1 + (Math.min(this.time, this.level.duration) / this.level.duration) * 0.7);
     const [img, flashImg] = elite ? eliteImgs(d) : [d.img, d.flash];
     const hp = Math.round(d.hp * hpScale * (elite ? 10 : 1));
     const e: Enemy = {
-      x, y, vx: 0, vy: 0, r: elite ? d.r * 2 : d.r, hp, maxHp: hp, speed: d.speed * (elite ? 0.8 : 1) * (0.9 + Math.random() * 0.2),
-      dmg: d.dmg * (elite ? 2 : 1), xp: Math.round(d.xp * (elite ? 10 : 1) * stageXpMul(this.idx)), img, flashImg, colors: d.colors,
+      x, y, vx: 0, vy: 0, r: elite ? d.r * 2 : d.r, hp, maxHp: hp, speed: d.speed * spdMul(this.idx) * (elite ? 0.8 : 1) * (0.9 + Math.random() * 0.2),
+      // elites hit 1.25x: they also have 10x HP and ignore knockback, and at 1.5x the elite whales left over from the
+      // waves did most of the damage in the late boss fights (tools/sim.js)
+      dmg: d.dmg * (elite ? 1.25 : 1), xp: Math.round(d.xp * (elite ? 10 : 1) * xpMul(this.idx)), img, flashImg, colors: d.colors,
       elite, boss: false, tag: kind, flash: 0, phase: Math.random() * 6.28, dead: false, orbCd: 0,
-      invuln: false, hidden: false, alpha: 1, noContact: false, noKnock: elite, ghost: false, data: {},
+      invuln: false, hidden: false, alpha: 1, noContact: false, noKnock: elite, ghost: false, ai: AI[kind],
+      data: { cd: 1 + Math.random() * 1.5, state: 0, t: 0, tele: 0 }, // special enemies' AI state
     };
     this.enemies.push(e);
     return e;
@@ -273,14 +283,16 @@ export class Game implements Scene {
     this.kills++;
     this.earned += killUsd(e.xp, this.idx);
     this.addPickup('gem', e.x, e.y - 3, e.xp);
-    if (e.elite) this.addPickup('chest', e.x + 6, e.y - 3);
+    if (e.elite && e.data.chest) this.addPickup('chest', e.x + 6, e.y - 3); // one chest per elite wave
     else if (Math.random() < 0.012) this.addPickup('heal', e.x, e.y - 3);
   }
 
-  hurtPlayer(raw: number) {
+  /** `wave`: the hit came from a wave enemy, which scales harder than boss attacks. */
+  hurtPlayer(raw: number, wave = false) {
     const p = this.player;
     if (p.iframes > 0 || GOD || this.phase === 'won') return;
-    const dmg = Math.max(1, Math.round(raw * this.fx.enemyDmgMul * stageDmgMul(this.idx)) - this.passives.armor);
+    const stage = wave ? dmgMul(this.idx) : bossDmgMul(this.idx);
+    const dmg = Math.max(1, Math.round(raw * this.fx.enemyDmgMul * stage * this.assist * armorMul(this.passives.armor)));
     p.hp -= dmg;
     p.iframes = 0.6;
     p.hurt = 0.2;
@@ -538,7 +550,7 @@ export class Game implements Scene {
       }
       e.x += e.vx * dt; e.y += e.vy * dt;
       e.vx *= 0.85; e.vy *= 0.85;
-      if (!e.noContact && Math.hypot(p.x - e.x, (p.y - 4) - (e.y - e.r)) < e.r + p.r) this.hurtPlayer(e.dmg);
+      if (!e.noContact && Math.hypot(p.x - e.x, (p.y - 4) - (e.y - e.r)) < e.r + p.r) this.hurtPlayer(e.dmg, !e.boss);
     }
     // separation (cheap, per cell)
     for (const cell of this.grid.values()) {
@@ -573,7 +585,7 @@ export class Game implements Scene {
       b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
       if (b.life <= 0) continue;
       if (!b.pierceShield && orbPos.some(([ox, oy]) => Math.hypot(ox - b.x, oy - b.y) < 4)) { b.life = 0; continue; }
-      if (Math.hypot(b.x - p.x, b.y - (p.y - 7)) < b.r + 4) { b.life = 0; this.hurtPlayer(b.dmg); }
+      if (Math.hypot(b.x - p.x, b.y - (p.y - 7)) < b.r + 4) { b.life = 0; this.hurtPlayer(b.dmg, b.wave === true); }
     }
     this.ebullets = this.ebullets.filter((b) => b.life > 0 && Math.abs(b.x - p.x) < 400 && Math.abs(b.y - p.y) < 300);
 
@@ -615,9 +627,10 @@ export class Game implements Scene {
       if (k.age < 0.35) { k.x += k.vx * dt; k.y += k.vy * dt; k.vy += 120 * dt; continue; }
       const locked = fx.gemsLocked && k.kind === 'gem';
       let d = Math.hypot(p.x - k.x, p.y - 6 - k.y);
-      if (!locked && (k.magnet || d < magR || (k.kind === 'fake' && d < magR * 0.6))) {
+      const pull = locked ? 0 : pickupPull(k.kind, d, magR, k.age, k.magnet);
+      if (pull > 0) {
         k.magnet = true;
-        d = stepToward(k, p.x, p.y - 6, 90 + k.age * 30, dt);
+        d = stepToward(k, p.x, p.y - 6, pull, dt);
       }
       if (!locked && d < 7) {
         k.age = -1;
@@ -647,8 +660,10 @@ export class Game implements Scene {
 
   private spawnWaves(dt: number, mul: number) {
     const t = Math.min(this.time, this.level.duration);
-    const rate = (1.3 + t * 0.04 + this.idx * 0.1) * mul; // later stages: denser hordes to mow down
-    const cap = 240;
+    const rate = spawnRate(this.idx, t) * mul;
+    const cap = this.phase === 'boss' ? bossSpawnCap(this.idx) : spawnCap(this.idx);
+    const extra = specials(this.idx), extraP = specialChance(this.idx);
+    let phishers = this.enemies.filter((e) => e.tag === 'phisher' && !e.dead).length;
     this.spawnAcc += rate * dt;
     const pool = this.level.pool;
     const p = this.player;
@@ -657,15 +672,19 @@ export class Game implements Scene {
       if (this.enemies.length >= cap) continue;
       // later in a level, tougher enemies appear more often
       const span = Math.max(1, Math.round(pool.length * (0.4 + 0.6 * (t / this.level.duration))));
-      const kind = pool[Math.floor(Math.random() * span)];
+      let kind = extra.length && Math.random() < extraP
+        ? extra[Math.floor(Math.random() * extra.length)]
+        : pool[Math.floor(Math.random() * span)];
+      if (kind === 'phisher' && phishers >= phisherCap(this.idx)) kind = pool[Math.floor(Math.random() * span)];
+      if (kind === 'phisher') phishers++;
       const a = Math.random() * Math.PI * 2;
       this.spawnEnemy(kind, p.x + Math.cos(a) * 210, p.y + Math.sin(a) * 130);
     }
     if (this.phase !== 'waves') return;
     if (this.time >= this.nextRing) {
-      this.nextRing += 45;
-      const n = 20 + this.idx;
-      const kind = pool[Math.floor(Math.random() * pool.length)];
+      this.nextRing += ringEvery(this.idx);
+      const n = ringSize(this.idx);
+      const kind = pool[Math.floor(Math.random() * Math.min(3, pool.length))]; // light enemies: a ring tests crowd control, it is not a death trap
       for (let i = 0; i < n; i++) {
         const a = (i / n) * Math.PI * 2;
         this.spawnEnemy(kind, p.x + Math.cos(a) * 150, p.y + Math.sin(a) * 100);
@@ -673,10 +692,15 @@ export class Game implements Scene {
       this.banner(tx('被包围了！', 'SURROUNDED!'), '#ff3d8b', undefined, 1.2);
     }
     if (this.time >= this.nextElite) {
-      this.nextElite += 40;
-      const kind = pool[Math.floor(Math.random() * pool.length)];
-      const a = Math.random() * 6.28;
-      this.spawnEnemy(kind, p.x + Math.cos(a) * 200, p.y + Math.sin(a) * 120, true);
+      this.nextElite += eliteEvery(this.idx);
+      // Elites come from the classic kinds only. A 10x-HP MEV bot or Lazarus agent pins you down
+      // (measured with tools/sim.js: most of the damage taken at stage 18).
+      const n = eliteCount(this.idx), kinds = pool;
+      for (let i = 0; i < n; i++) {
+        const a = Math.random() * 6.28;
+        const e = this.spawnEnemy(kinds[Math.floor(Math.random() * kinds.length)], p.x + Math.cos(a) * 200, p.y + Math.sin(a) * 120, true);
+        if (i === 0) e.data.chest = 1;
+      }
     }
   }
 
@@ -871,6 +895,10 @@ export class Game implements Scene {
       const w = Math.max(10, e.r * 2);
       ctx.fillStyle = '#0b0d17'; ctx.fillRect(sx - w / 2, dy - 4, w, 3);
       ctx.fillStyle = e.elite ? '#ffd23f' : '#ff3d8b'; ctx.fillRect(sx - w / 2 + 1, dy - 3, Math.max(0, Math.round((w - 2) * e.hp / e.maxHp)), 1);
+    }
+    // Phishers about to fire and MEV bots winding up a dash show a blinking "!".
+    if (!e.boss && e.data.tele && this.time % 0.16 < 0.1) {
+      drawText(ctx, '!', sx, dy - 10, { size: 8, color: '#ff4545', outline: '#0b0d17', align: 'center' });
     }
   }
 

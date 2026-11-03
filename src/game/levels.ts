@@ -1,7 +1,8 @@
 // The 28 levels, one per historic hack. Figures are the commonly reported numbers.
 import type { Text } from '../i18n';
 
-export type EnemyKind = 'bug' | 'drainer' | 'bot' | 'airdrop' | 'rug' | 'whale' | 'ninja';
+// phisher, mev and lazarus are never in a level's pool: they join by stage (see difficulty.ts specials).
+export type EnemyKind = 'bug' | 'drainer' | 'bot' | 'airdrop' | 'rug' | 'whale' | 'ninja' | 'phisher' | 'mev' | 'lazarus';
 export type BossArt = 'vault' | 'slime' | 'duo' | 'bomb' | 'hood' | 'portal' | 'tower' | 'oracle' | 'final';
 
 export interface LevelDef {
@@ -162,7 +163,7 @@ export const LEVELS: LevelDef[] = [
   { id: 26, date: '2026.09', name: 'LIQUID', loss: t('3.19 亿美元 BTC', '$319M BTC'), art: 'vault', color: '#f7931a', pool: ERA4, duration: 120, floor: F4,
     boss: t('侧链金库', 'The Sidechain Vault'), tag: t('锚定区', 'PEG ZONE'),
     flavor: t('比特币侧链被掏走 3.19 亿美元……然后黑客又退回了 85%？', '$319M drained from a Bitcoin sidechain... then the hacker sent back 85%?'),
-    hint: t('只有站在绿色锚定圈（PEG）里，Boss 才会受伤。', 'The boss only takes damage while you stand in the green PEG circle.'),
+    hint: t('站在绿色锚定圈（PEG）里 Boss 才会受伤。敌人进不了圈，子弹能。', 'It only takes damage while you stand in the green PEG. Enemies can\'t enter; bullets can.'),
     goal: t('站进锚定圈，击败侧链金库', 'Hold the PEG zone and defeat it') },
   { id: 27, date: '2026.09', name: 'BITGET', loss: t('3.88 亿美元', '$388M'), art: 'hood', color: '#00c4c4', pool: ERA4, duration: 120, floor: F4,
     boss: t('TraderTraitor 先锋', 'TraderTraitor Vanguard'), tag: t('螺旋弹幕', 'BULLET HELL'),

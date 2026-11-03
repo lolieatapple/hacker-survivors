@@ -55,8 +55,9 @@ export const MIN_STAGE_SECONDS = 110;
  */
 export function maxAssets(cleared: number): number {
   let sum = 0;
-  for (let i = 0; i < Math.min(cleared, STAGES); i++) sum += LOSS_USD[i] + killUsd(8000, i);
-  return sum + killUsd(8000, Math.min(cleared, STAGES - 1)); // the stage in progress
+  // 30000 XP per stage is a generous ceiling on kill income (tools/sim.js peaks near 14000 on long late stages).
+  for (let i = 0; i < Math.min(cleared, STAGES); i++) sum += LOSS_USD[i] + killUsd(30000, i);
+  return sum + killUsd(30000, Math.min(cleared, STAGES - 1)); // the stage in progress
 }
 
 /** "$12,345,678" */

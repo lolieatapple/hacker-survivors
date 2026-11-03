@@ -243,13 +243,14 @@ const BRAINS: Record<number, Factory> = {
     end(g) { g.bossUnits().forEach((e) => { if (e.tag === 'key') e.dead = true; }); },
   }; },
 
-  // 11 Beanstalk: flash loan — immune & huge, then weak while repaying
+  // 11 Beanstalk: flash loan — immune & huge, then weak while repaying.
+  // During the loan it runs at 55 px/s, below the player's 62, so it can be outrun.
   11: (L) => { let st = 'normal', t = 0; const T = new Timers(); return {
     start(g) { spawnBoss(g, L, 1400); },
     update(g, dt) {
       const b = main(g); if (!b) return;
       t += dt;
-      if (st === 'normal' && t > 6) { st = 'loan'; t = 0; b.invuln = true; b.speed = 70; b.dmg = 25; g.banner(tx('闪电贷！', 'FLASH LOAN!'), '#ffd23f', tx('Boss 借来巨量战力：无敌 4 秒', 'Borrowed power: immune for 4s'), 1.5); }
+      if (st === 'normal' && t > 6) { st = 'loan'; t = 0; b.invuln = true; b.speed = 55; b.dmg = 25; g.banner(tx('闪电贷！', 'FLASH LOAN!'), '#ffd23f', tx('Boss 借来巨量战力：无敌 4 秒', 'Borrowed power: immune for 4s'), 1.5); }
       else if (st === 'loan' && t > 4) { st = 'repay'; t = 0; b.invuln = false; b.speed = 0; b.dmg = 10; g.banner(tx('还款中', 'REPAYING'), '#39ff88', tx('Boss 虚弱：受到双倍伤害，快打！', 'Weakened: double damage — hit it now!'), 1.5); }
       else if (st === 'repay' && t > 3) { st = 'normal'; t = 0; b.speed = 20; b.dmg = 15; }
       if (st === 'loan') T.every('l', 0.5, dt, () => ring(g, b, 12, 70, g.time, { color: '#ffd23f' }));
@@ -357,16 +358,25 @@ const BRAINS: Record<number, Factory> = {
 
   // 18 Multichain: the CEO vanishes, the safe zone shrinks
   18: (L) => { let st = 'shown', t = 0; const T = new Timers(); return {
+    // Fewer horde spawns during this fight and a 90 px floor: the horde walks into a closed arena,
+    // and with no room to move it can't be dodged (measured with tools/sim.js at stage 18).
+    init(g) { g.fx.spawnMul = 0.4; },
     start(g) { spawnBoss(g, L, 1400); g.arena = { x: g.player.x, y: g.player.y, r: 160 }; },
     update(g, dt) {
       const b = main(g); if (!b || !g.arena) return;
-      g.arena.r = Math.max(70, g.arena.r - dt * 1.6);
+      g.arena.r = Math.max(90, g.arena.r - dt * 1.6);
       t += dt;
       if (st === 'shown' && t > 5) { st = 'gone'; t = 0; b.hidden = true; b.invuln = true; b.alpha = 0; b.noContact = true; g.banner(tx('CEO 失联', 'CEO WENT DARK'), '#5f6bff', undefined, 1); }
       else if (st === 'gone' && t > 3) {
         st = 'shown'; t = 0;
-        const a = Math.random() * 6.28, r = Math.random() * g.arena.r * 0.6;
-        teleport(g, b, g.arena.x + Math.cos(a) * r, g.arena.y + Math.sin(a) * r);
+        // reappear somewhere in the arena, but never on top of the player (that was an unfair hit)
+        let x = g.arena.x, y = g.arena.y;
+        for (let i = 0; i < 12; i++) {
+          const a = Math.random() * 6.28, r = Math.random() * g.arena.r * 0.6;
+          x = g.arena.x + Math.cos(a) * r; y = g.arena.y + Math.sin(a) * r;
+          if (Math.hypot(x - g.player.x, y - g.player.y) > 50) break;
+        }
+        teleport(g, b, x, y);
         b.hidden = false; b.invuln = false; b.alpha = 1; b.noContact = false;
         ring(g, b, 16, 60, 0, { color: '#5f6bff' });
       }
@@ -458,7 +468,8 @@ const BRAINS: Record<number, Factory> = {
 
   // 24 Drift: drained in minutes — 60 seconds to win
   24: (L) => { const T = new Timers(); return {
-    start(g) { spawnBoss(g, L, 1300, { speed: 34 }); },
+    // less HP than other late bosses: the fight has a hard 60 s limit, and boss HP now grows with the build
+    start(g) { spawnBoss(g, L, 1000, { speed: 34 }); },
     update(g, dt) {
       const b = main(g); if (!b) return;
       if (g.bossTime > 60) { g.player.iframes = 0; g.hurtPlayer(99999); return; }
@@ -470,20 +481,22 @@ const BRAINS: Record<number, Factory> = {
   // 25 KelpDAO: portal hopping — destroy the gates first
   25: (L) => { const T = new Timers(); let open = false; return {
     start(g) {
-      const b = spawnBoss(g, L, 1300);
+      // gates + boss together: at 260 HP per gate (x3) and a 1300 HP boss, tools/sim.js took 150 s just on the gates
+      const b = spawnBoss(g, L, 1000);
       b.invuln = true;
       const gate = bossSprites('portal', '#14b8a6');
       const img = shrink(gate.img);
       for (let i = 0; i < 3; i++) {
         const a = (i / 3) * 6.28;
-        g.spawnUnit({ x: g.player.x + Math.cos(a) * 95, y: g.player.y + Math.sin(a) * 65, img, flashImg: silhouette(img, '#fff'), hp: Math.round(260 * g.hpMul), maxHp: Math.round(260 * g.hpMul), tag: 'gate', speed: 0, noContact: true, ai: () => {} });
+        g.spawnUnit({ x: g.player.x + Math.cos(a) * 95, y: g.player.y + Math.sin(a) * 65, img, flashImg: silhouette(img, '#fff'), hp: Math.round(90 * g.hpMul), maxHp: Math.round(90 * g.hpMul), tag: 'gate', speed: 0, noContact: true, ai: () => {} });
       }
     },
     update(g, dt) {
       const b = main(g); if (!b) return;
       const gates = g.bossUnits().filter((e) => e.tag === 'gate');
       if (!gates.length && !open) { open = true; b.invuln = false; g.banner(tx('传送门已拆除', 'PORTALS DOWN'), '#39ff88', tx('Boss 无处可逃，现在可以攻击了', 'Nowhere to run — attack now'), 1.5); }
-      T.every('hop', 3, dt, () => { if (gates.length) { const gt = gates[Math.floor(Math.random() * gates.length)]; teleport(g, b, gt.x, gt.y + 4); ring(g, b, 10, 60, 0, { color: '#14b8a6' }); } });
+      // hops to the gate farthest from you: landing on the gate you're breaking put its ring point-blank, with no warning
+      T.every('hop', 3, dt, () => { if (gates.length) { const gt = gates.reduce((a, c) => (Math.hypot(c.x - g.player.x, c.y - g.player.y) > Math.hypot(a.x - g.player.x, a.y - g.player.y) ? c : a)); teleport(g, b, gt.x, gt.y + 4); ring(g, b, 10, 60, 0, { color: '#14b8a6' }); } });
       T.every('spawn', 4, dt, () => gates.forEach((gt) => summon(g, 'ninja', 2, gt.x, gt.y, 10)));
       if (open) T.every('aim', 1.8, dt, () => aimed(g, b, 3, 0.2, 75, { color: '#14b8a6' }));
     },
@@ -500,6 +513,13 @@ const BRAINS: Record<number, Factory> = {
         peg = g.zone({ x, y, r: 28, warn: 0.3, life: 6.2, kind: 'peg', color: '#39ff88', dmg: 0 });
       }, 0.01);
       b.invuln = !playerIn(g, peg);
+      // the peg holds: enemies (the boss too) can't step inside. You must stand in it to do damage, and
+      // elites left over from the waves used to pin you there (tools/sim.js died in 10 s, 6 tries in a row).
+      if (peg && peg.warn <= 0) for (const e of g.enemies) {
+        if (e.dead) continue;
+        const dx = e.x - peg.x, dy = e.y - peg.y, d = Math.hypot(dx, dy) || 1, R = peg.r + e.r;
+        if (d < R) { e.x = peg.x + (dx / d) * R; e.y = peg.y + (dy / d) * R; }
+      }
       T.every('ring', 2.8, dt, () => ring(g, b, 12, 50, g.time, { color: '#f7931a' }));
     },
     drawOver(g, ctx) { if (peg && peg.warn <= 0) { const [x, y] = g.toScreen(peg.x, peg.y); drawText(ctx, 'PEG', x, y - 4, { size: 8, color: '#39ff88', outline: '#0b0d17', align: 'center' }); } },
@@ -508,7 +528,8 @@ const BRAINS: Record<number, Factory> = {
 
   // 27 Bitget: TraderTraitor vanguard — spiral bullet hell
   27: (L) => { const T = new Timers(); return {
-    start(g) { spawnBoss(g, L, 1600, { speed: 8 }); },
+    // a bullet-hell fight: at 1600 HP (with the boss HP growth) tools/sim.js was still in the spiral after a minute
+    start(g) { spawnBoss(g, L, 1150, { speed: 8 }); },
     update(g, dt) {
       const b = main(g); if (!b) return;
       T.every('spiral', 0.12, dt, () => { const a = g.time * 2.2; g.shoot(b.x, b.y - b.r, a, 52, { color: '#00c4c4' }); g.shoot(b.x, b.y - b.r, a + Math.PI, 52, { color: '#00c4c4' }); });
@@ -527,10 +548,11 @@ const BRAINS: Record<number, Factory> = {
       start(g) {
         const b = spawnBoss(g, L, 2200, { speed: 14 });
         b.invuln = true;
+        // nodes at 110 HP each: at 180 the ten of them held more HP than the boss, and all ten shoot while they live
         CHAINS.forEach(([name, col], i) => {
           const img = chainNode(col);
           const a = (i / 10) * 6.28;
-          g.spawnUnit({ x: g.player.x + Math.cos(a) * 110, y: g.player.y + Math.sin(a) * 75, img, hp: Math.round(180 * g.hpMul), maxHp: Math.round(180 * g.hpMul), tag: 'node', speed: 0, noContact: true, colors: [col, '#f4f4f8'], data: { i }, ai: () => {} });
+          g.spawnUnit({ x: g.player.x + Math.cos(a) * 110, y: g.player.y + Math.sin(a) * 75, img, hp: Math.round(110 * g.hpMul), maxHp: Math.round(110 * g.hpMul), tag: 'node', speed: 0, noContact: true, colors: [col, '#f4f4f8'], data: { i }, ai: () => {} });
           void name;
         });
         g.banner(tx('10 条链同时告急', '10 CHAINS HIT'), '#f3ba2f', tx('先切断每条链上的攻击节点', 'Cut the attack node on every chain'), 2);

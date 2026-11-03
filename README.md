@@ -9,6 +9,8 @@ A pixel-art survivors game about crypto's worst hacks. One run is 28 stages in a
 - Your build carries over from stage to stage. Weapons evolve at Lv 10 and keep overclocking after that; all six can be owned at once.
 - Your score is your assets in USD: every hacker you kill is money you intercept, and every boss you beat recovers part of what that hack stole (more if you beat it fast).
 - Each stage start is a checkpoint. Die and you retry the stage, but the hackers take 5% of your assets and the upgrades from the failed try are lost.
+- Enemies keep pace with your build. Each stage brings more of them, and they are tougher, faster and hit harder. Elites come in larger packs, and rings close in more often. New kinds join the horde: phishers shoot hooks (from stage 4), MEV bots wind up and dash (stage 7), and Lazarus agents are fast tanks (stage 13). A red "!" shows just before they strike.
+- Stuck on a stage? Each death there cuts its enemies' HP and damage by 8%, down to 60%. The bonus resets once you clear the stage.
 - Set a nickname and your best run goes on the global leaderboard. You can also post your score to X.
 
 **Play:** https://hacker-survivors.lolieatapple.workers.dev
@@ -42,6 +44,8 @@ Debug URL flags: `?level=N` (start a run at stage N with a random build), `?boss
 ```js
 const { sim } = await import('/tools/sim.js'); (await sim(0, 27)).join('\n')
 ```
+
+Difficulty lives in `src/game/difficulty.ts`, which is plain functions with unit tests. Enemy HP follows build damage measured with the sim. Builds vary a lot from run to run, so judge any change on a few runs side by side.
 
 ## Deploy
 

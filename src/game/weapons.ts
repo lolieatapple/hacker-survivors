@@ -243,7 +243,7 @@ export function weaponDesc(id: WeaponId, lvl: number): string {
 
 export const PASSIVES: Record<PassiveId, { name: Text; icon: HTMLCanvasElement; desc: Text; max: number }> = {
   hp: { name: { zh: '硬件钱包', en: 'Hardware Wallet' }, icon: ICONS.hp, desc: { zh: '最大生命 +20', en: 'Max HP +20' }, max: 10 },
-  armor: { name: { zh: '2FA 认证', en: '2FA' }, icon: ICONS.armor, desc: { zh: '每次受到的伤害 -1', en: 'Take 1 less damage per hit' }, max: 5 },
+  armor: { name: { zh: '2FA 认证', en: '2FA' }, icon: ICONS.armor, desc: { zh: '受到的伤害 -7%', en: 'Take 7% less damage' }, max: 5 },
   speed: { name: { zh: '节点加速', en: 'Node Boost' }, icon: ICONS.speed, desc: { zh: '移动速度 +8%', en: 'Move speed +8%' }, max: 5 },
   power: { name: { zh: '算力提升', en: 'Hashpower' }, icon: ICONS.power, desc: { zh: '所有伤害 +10%', en: 'All damage +10%' }, max: 10 },
   haste: { name: { zh: '低 Gas 费', en: 'Low Gas' }, icon: ICONS.haste, desc: { zh: '武器冷却 -8%', en: 'Weapon cooldown -8%' }, max: 5 },

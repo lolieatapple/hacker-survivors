@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { stepToward } from './motion';
+import { stepToward, pickupPull } from './motion';
 
 describe('stepToward', () => {
   test('a slow mover covers exactly speed * dt', () => {
@@ -34,6 +34,32 @@ describe('stepToward', () => {
       const m = { x: 50 + Math.cos(a) * r, y: -20 + Math.sin(a) * r };
       const left = stepToward(m, 50, -20, 6000, 1 / 60); // 100 px per frame
       expect(left).toBe(0);
+    }
+  });
+});
+
+describe('pickupPull', () => {
+  const PLAYER_SPEED = 62; // base walk speed, before Node Boost
+  test('real gems inside the pickup range fly in, and speed up with age', () => {
+    expect(pickupPull('gem', 30, 36, 0, false)).toBe(90);
+    expect(pickupPull('gem', 30, 36, 2, false)).toBe(150);
+    expect(pickupPull('gem', 40, 36, 0, false)).toBe(0);
+    expect(pickupPull('gem', 400, 36, 1, true)).toBe(120); // once pulled, it keeps coming
+  });
+
+  // Regression: fake (phishing) gems used the full pickup range and the fast gem pull, so with a
+  // couple of Airdrop Hunter levels every fake the stage 6 boss dropped 30-70 px away was a sure hit.
+  test('fake gems only lure from 60% of the range', () => {
+    for (const magR of [36, 54, 90]) {
+      expect(pickupPull('fake', magR * 0.8, magR, 0, false)).toBe(0);
+      expect(pickupPull('fake', magR * 0.5, magR, 0, false)).toBeGreaterThan(0);
+    }
+  });
+  test('fake gems drift slower than you walk, at any age, so you can always step away', () => {
+    for (const age of [0, 1, 5, 30]) {
+      const s = pickupPull('fake', 10, 36, age, true);
+      expect(s).toBeGreaterThan(0);
+      expect(s).toBeLessThan(PLAYER_SPEED);
     }
   });
 });

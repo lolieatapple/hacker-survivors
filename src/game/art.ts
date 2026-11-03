@@ -39,6 +39,45 @@ export const WHALE = sprite('whale', [
   '....kkkkkkkk....',
 ]);
 
+// Stage 4+: keeps its distance and fires phishing hooks.
+export const PHISHER = sprite('phisher', [
+  '...kkkk...',
+  '..kmmmmk..',
+  '.kmwwwwmk.',
+  'kmwkwwkwmk',
+  'kmwwwwwwmk',
+  'kmmwkkwmmk',
+  '.kmmmmmmk.',
+  '..kk..kk..',
+  '...kyyk...',
+  '....kyk...',
+]);
+// Stage 7+: MEV sandwich bot. Locks on, winds up, then dashes through you.
+export const MEV = sprite('mev', [
+  '..kkkkkk..',
+  '.kooooook.',
+  'kowkoowkok',
+  'kggggggggk',
+  'krrrrrrrrk',
+  'kyyyyyyyyk',
+  '.kOOOOOOk.',
+  '..kkkkkk..',
+]);
+// Stage 13+: Lazarus agent. Fast, tough, hits hard.
+export const LAZARUS = sprite('lazarus', [
+  '....kkkk....',
+  '...khhhhk...',
+  '..khHHHHhk..',
+  '..khkkkkhk..',
+  '..kkrkkrkk..',
+  '..khkkkkhk..',
+  '.khhhhhhhhk.',
+  'khHhrrrrhHhk',
+  'khhhhhhhhhhk',
+  '.khhk..khhk.',
+  '.kkk....kkk.',
+]);
+
 export const USDT = sprite('usdt', [
   '.kkkkk.',
   'kGgggGk',

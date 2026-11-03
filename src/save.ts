@@ -51,7 +51,12 @@ function load(): SaveData {
   if (typeof parsed.playerId !== 'string' || typeof parsed.muted !== 'boolean' || !('run' in parsed) || !('best' in parsed)) {
     throw new Error(`[save] malformed save data: ${raw}`);
   }
-  if (parsed.run) checkBuild(parsed.run.build);
+  if (parsed.run) {
+    // Runs saved before the comeback assist (2026-11-03) have no stageDeaths yet: start them at 0.
+    if (!('stageDeaths' in parsed.run)) (parsed.run as Run).stageDeaths = 0;
+    if (!Number.isInteger(parsed.run.stageDeaths)) throw new Error(`[save] malformed run: ${raw}`);
+    checkBuild(parsed.run.build);
+  }
   return parsed;
 }
 

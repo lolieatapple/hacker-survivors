@@ -19,6 +19,7 @@ export interface Run {
   kills: number;
   seconds: number;     // play time of cleared stages
   deaths: number;
+  stageDeaths: number; // deaths on `stage` so far: each one softens the retry (difficulty.ts assistMul)
 }
 
 const zeroPassives = (): Record<PassiveId, number> =>
@@ -28,7 +29,7 @@ export const freshBuild = (): Build => ({ lvl: 1, xp: 0, maxHp: 100, weapons: [{
 
 export const cloneBuild = (b: Build): Build => ({ ...b, weapons: b.weapons.map((w) => ({ ...w })), passives: { ...b.passives } });
 
-export const newRun = (): Run => ({ id: crypto.randomUUID(), registered: false, stage: 0, build: freshBuild(), assets: 0, kills: 0, seconds: 0, deaths: 0 });
+export const newRun = (): Run => ({ id: crypto.randomUUID(), registered: false, stage: 0, build: freshBuild(), assets: 0, kills: 0, seconds: 0, deaths: 0, stageDeaths: 0 });
 
 /** Throws if a saved build does not have the expected shape. */
 export function checkBuild(b: Build): Build {
